@@ -1463,7 +1463,11 @@ public enum MermaidParser {
             if line.hasPrefix("state "), line.hasSuffix("{") { depth += 1; maxDepth = max(maxDepth, depth) }
             if line == "}" { depth = max(0, depth - 1) }
         }
-        guard maxDepth <= 32 else { return nil }
+        guard maxDepth <= 32 else {
+            ParseReport.reject(.limitExceeded,
+                               "state nesting is \(maxDepth) levels deep; the cap is 32")
+            return nil
+        }
 
         var index = 0
         var scopeCounter = 0
