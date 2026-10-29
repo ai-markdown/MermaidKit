@@ -89,11 +89,13 @@ extension DiagramScene {
         }
         for quadrant in layout.quadrants + (layout.center.map { [$0] } ?? []) {
             for item in quadrant.items {
-                let w = measuredLabelSize(measure, item.text).width
+                // Wrapped items are multi-line blocks centered on `center`.
+                let size = measuredLabelSize(measure, item.text)
+                let h = max(14, size.height)
                 labels.append(Label(
                     text: item.text,
-                    frame: CGRect(x: item.center.x - w / 2, y: item.center.y - 7,
-                                  width: w, height: 14)))
+                    frame: CGRect(x: item.center.x - size.width / 2, y: item.center.y - h / 2,
+                                  width: size.width, height: h)))
             }
         }
         var edges: [Edge] = []
