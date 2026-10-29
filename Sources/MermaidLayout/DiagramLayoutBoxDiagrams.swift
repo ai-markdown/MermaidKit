@@ -205,7 +205,8 @@ extension DiagramLayoutEngine {
         let result = layoutStateScope(diagram, depth: 0, measure: measure, spacing: spacing)
         return StateLayout(
             size: result.size, nodes: result.nodes,
-            containers: result.containers, edges: result.edges
+            containers: result.containers, edges: result.edges,
+            notes: result.notes
         )
     }
 
@@ -213,8 +214,15 @@ extension DiagramLayoutEngine {
         var nodes: [StateLayout.Node]
         var containers: [StateLayout.Container]
         var edges: [StateLayout.Edge]
+        var notes: [StateLayout.Note]
         var size: CGSize
     }
+
+    /// Padding around a state note's text, and the gap between the scope's
+    /// content and its note columns (and between stacked notes).
+    static let stateNotePadX: CGFloat = 8
+    static let stateNotePadY: CGFloat = 6
+    static let stateNoteGap: CGFloat = 16
 
     /// Lays out one state scope, recursing into composites first so each one
     /// becomes a fixed-size box in its parent's layout. Interior placements
@@ -251,7 +259,7 @@ extension DiagramLayoutEngine {
             }
         }
 
-        let (frames, scopeSize, routes, labelAnchors) = layeredRoutes(
+        var (frames, scopeSize, routes, labelAnchors) = layeredRoutes(
             ids: diagram.nodes.map(\.id),
             sizes: sizes,
             layeringEdges: diagram.edges.map { ($0.from, $0.to) },
@@ -263,6 +271,85 @@ extension DiagramLayoutEngine {
                 edge.label.flatMap { $0.isEmpty ? nil : measure($0, labelFontSize) }
             }
         )
+
+        // Notes. Each note first tries the free space right beside its
+        // target (sliding down a little if that spot is taken); a note that
+        // finds no free spot there goes to a column outside the scope's
+        // content on its side, centered on the target where possible and
+        // pushed below the note above it. Either way a note never overlaps a
+        // state, a transition, a label or another note.
+        var outNotes: [StateLayout.Note] = []
+        let gap = Self.stateNoteGap
+        let margin = spacing.resolvedMargin(base: 6)   // the margin layeredRoutes left
+        let noteSizes = diagram.notes.map { note -> CGSize in
+            let text = measure(note.text, labelFontSize)
+            return CGSize(width: text.width + Self.stateNotePadX * 2, height: text.height + Self.stateNotePadY * 2)
+        }
+        var obstacles: [CGRect] = frames.values.map { $0.insetBy(dx: -4, dy: -4) }
+        for route in routes {
+            for (p, q) in zip(route, route.dropFirst()) {
+                obstacles.append(CGRect(x: min(p.x, q.x), y: min(p.y, q.y),
+                                        width: abs(p.x - q.x), height: abs(p.y - q.y)).insetBy(dx: -3, dy: -3))
+            }
+        }
+        for (i, edge) in diagram.edges.enumerated() {
+            guard let text = edge.label, !text.isEmpty, let anchor = labelAnchors[i] else { continue }
+            let size = measure(text, labelFontSize)
+            obstacles.append(CGRect(x: anchor.x - size.width / 2 - 4, y: anchor.y - size.height / 2 - 4,
+                                    width: size.width + 8, height: size.height + 8))
+        }
+        var placed: [Int: CGRect] = [:]          // note index → frame beside its target
+        var columnNotes: [Int] = []
+        for (i, note) in diagram.notes.enumerated() {
+            guard let target = frames[note.target] else { continue }
+            let size = noteSizes[i]
+            let x = note.side == .right ? target.maxX + gap : target.minX - gap - size.width
+            var spot: CGRect?
+            for step in 0...12 {
+                let candidate = CGRect(x: x, y: max(margin, target.midY - size.height / 2 + CGFloat(step) * 8),
+                                       width: size.width, height: size.height)
+                let busy = obstacles.contains { $0.intersects(candidate) }
+                    || placed.values.contains { $0.insetBy(dx: -4, dy: -4).intersects(candidate) }
+                if !busy { spot = candidate; break }
+            }
+            if let spot { placed[i] = spot } else { columnNotes.append(i) }
+        }
+        // Columns hug the content's outer edges (left notes right-aligned).
+        let contentWidth = scopeSize.width
+        for side in [StateDiagram.Note.Side.left, .right] {
+            var columnBottom = margin - gap / 2
+            for i in columnNotes where diagram.notes[i].side == side {
+                guard let target = frames[diagram.notes[i].target] else { continue }
+                let size = noteSizes[i]
+                let x = side == .left ? margin - gap - size.width : contentWidth - margin + gap
+                var frame = CGRect(x: x, y: max(target.midY - size.height / 2, columnBottom + gap / 2, margin),
+                                   width: size.width, height: size.height)
+                // Clear any note already placed beside a state at the edge.
+                while let hit = placed.values.first(where: { $0.insetBy(dx: -4, dy: -4).intersects(frame) }) {
+                    frame.origin.y = hit.maxY + gap / 2
+                }
+                placed[i] = frame
+                columnBottom = frame.maxY
+            }
+        }
+        // Notes left of the content: shift everything right to make room.
+        if let minX = placed.values.map(\.minX).min(), minX < margin {
+            let dx = margin - minX
+            for (id, frame) in frames { frames[id] = frame.offsetBy(dx: dx, dy: 0) }
+            for (i, frame) in placed { placed[i] = frame.offsetBy(dx: dx, dy: 0) }
+            routes = routes.map { $0.map { CGPoint(x: $0.x + dx, y: $0.y) } }
+            labelAnchors = labelAnchors.map { $0.map { CGPoint(x: $0.x + dx, y: $0.y) } }
+            scopeSize.width += dx
+        }
+        for (i, note) in diagram.notes.enumerated() {
+            guard let frame = placed[i], let target = frames[note.target] else { continue }
+            let start = CGPoint(x: note.side == .left ? target.minX : target.maxX, y: target.midY)
+            let end = CGPoint(x: note.side == .left ? frame.maxX : frame.minX,
+                              y: min(max(target.midY, frame.minY + 4), frame.maxY - 4))
+            outNotes.append(StateLayout.Note(text: note.text, frame: frame, leader: [start, end]))
+            scopeSize.width = max(scopeSize.width, frame.maxX + margin)
+            scopeSize.height = max(scopeSize.height, frame.maxY + margin)
+        }
 
         var outNodes: [StateLayout.Node] = []
         var outContainers: [StateLayout.Container] = []
@@ -300,6 +387,12 @@ extension DiagramLayoutEngine {
                         titleHeight: c.titleHeight, depth: c.depth
                     ))
                 }
+                for n in child.notes {
+                    outNotes.append(StateLayout.Note(
+                        text: n.text, frame: n.frame.offsetBy(dx: dx, dy: dy),
+                        leader: n.leader.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+                    ))
+                }
                 for e in child.edges {
                     outEdges.append(StateLayout.Edge(
                         start: CGPoint(x: e.start.x + dx, y: e.start.y + dy),
@@ -329,7 +422,7 @@ extension DiagramLayoutEngine {
 
         return StateScopeResult(
             nodes: outNodes, containers: outContainers,
-            edges: outEdges, size: scopeSize
+            edges: outEdges, notes: outNotes, size: scopeSize
         )
     }
 

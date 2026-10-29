@@ -1460,7 +1460,11 @@ public enum MermaidParser {
     /// stateDiagram / stateDiagram-v2 → a nested StateDiagram. `state X { … }`
     /// blocks recurse into composites (each with its own `[*]` entry/exit);
     /// `<<choice>>` / `<<fork>>` / `<<join>>` annotations mark special shapes;
-    /// transitions are arrows with an optional `: label`.
+    /// transitions are arrows with an optional `: label`; `X : text` adds a
+    /// description line; `note left|right of X : text` and the multi-line
+    /// `note … of X` / `end note` form attach notes to the enclosing scope.
+    /// An unclosed `state X {` or `note` block rejects the diagram, as
+    /// mermaid.js does.
     static func parseState(body: [String]) -> StateDiagram? {
         // Composite parsing (and the layout that mirrors it) recurses once per
         // `state X {` nesting level. A linear pre-scan bounds that depth so
@@ -1480,15 +1484,20 @@ public enum MermaidParser {
         var index = 0
         var scopeCounter = 0
         let direction = detectStateDirection(body)
+        // The first block left open at the end of input, if any.
+        var unclosed: (line: String, what: String)?
 
         // Recursively parses one brace scope, consuming lines until its
         // closing `}` (or end of input for the root). `scopeID` disambiguates
         // this scope's synthetic `[*]` terminals from every other scope's.
-        func parseScope(scopeID: String) -> StateDiagram {
+        func parseScope(scopeID: String, opener: String?) -> StateDiagram {
             var nodes: [String: StateDiagram.Node] = [:]
             var order: [String] = []
             var edges: [StateDiagram.Edge] = []
+            var notes: [StateDiagram.Note] = []
+            var noteLines: [String] = []          // source line of each note
             var annotations: [String: StateDiagram.Kind] = [:]  // id → choice/fork/join
+            var closed = false
 
             func note(id: String, label: String, kind: StateDiagram.Kind) {
                 if let existing = nodes[id] {
@@ -1505,16 +1514,22 @@ public enum MermaidParser {
             }
 
             // Resolves a transition endpoint token to a node id, minting a
-            // scope-local terminal for `[*]`.
+            // scope-local terminal for `[*]` and history pseudo-state for `[H]`.
             func endpoint(_ token: String, isSource: Bool) -> String? {
-                let trimmed = token.trimmingCharacters(in: .whitespaces)
+                var trimmed = token.trimmingCharacters(in: .whitespaces)
+                if let styled = trimmed.range(of: ":::") { trimmed = String(trimmed[..<styled.lowerBound]) }
                 guard !trimmed.isEmpty else { return nil }
                 if trimmed == "[*]" {
                     let id = isSource ? "\(scopeID)__start" : "\(scopeID)__end"
                     note(id: id, label: "", kind: isSource ? .start : .end)
                     return id
                 }
-                guard trimmed.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else { return nil }
+                if trimmed == "[H]" || trimmed == "[H*]" {
+                    let id = "\(scopeID)__history\(trimmed == "[H*]" ? "_deep" : "")"
+                    note(id: id, label: trimmed == "[H*]" ? "H*" : "H", kind: .simple)
+                    return id
+                }
+                guard trimmed.allSatisfy(isStateIDCharacter) else { return nil }
                 note(id: trimmed, label: trimmed, kind: .simple)
                 return trimmed
             }
@@ -1523,17 +1538,63 @@ public enum MermaidParser {
                 let line = body[index]
                 index += 1
 
-                if line == "}" { break }                       // close this scope
+                if line == "}" {
+                    if opener != nil { closed = true; break }    // close this scope
+                    ParseReport.note(.invalidSyntax,
+                                     "stray `}` with no open composite state; mermaid.js draws it as a state named '}'",
+                                     line: line)
+                    continue
+                }
                 if line.hasPrefix("direction") { continue }    // handled globally
-                if line.hasPrefix("note") || line.hasPrefix("Note") { continue }
+
+                if startsWithKeyword(line.lowercased(), "note"), !line.contains("-->") {
+                    if let parsed = stateNote(line) {
+                        if let text = parsed.text {
+                            notes.append(.init(target: parsed.target, side: parsed.side, text: text))
+                            noteLines.append(line)
+                        } else {
+                            // Multi-line: body lines up to `end note`.
+                            var text: [String] = []
+                            var ended = false
+                            while index < body.count {
+                                let bodyLine = body[index]
+                                index += 1
+                                if bodyLine.lowercased() == "end note" { ended = true; break }
+                                text.append(bodyLine)
+                            }
+                            guard ended else {
+                                if unclosed == nil { unclosed = (line, "note block is never closed with `end note`") }
+                                break
+                            }
+                            notes.append(.init(target: parsed.target, side: parsed.side,
+                                               text: text.joined(separator: "\n")))
+                            noteLines.append(line)
+                        }
+                    } else if line.range(of: #"^note\s+".*"\s+as\s+\S+$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+                        ParseReport.note(.contentDropped,
+                                         "floating notes (`note \"…\" as N`) are not drawn (mermaid.js doesn't draw them either)",
+                                         line: line)
+                    } else {
+                        ParseReport.note(.invalidSyntax,
+                                         "a state note is `note left of X : text` or `note right of X : text`; this one is left out",
+                                         line: line)
+                    }
+                    continue
+                }
 
                 // `state X { ` opens a composite — recurse.
                 if line.hasPrefix("state "), line.hasSuffix("{") {
                     let inner = String(line.dropFirst("state ".count).dropLast())
                         .trimmingCharacters(in: .whitespaces)
-                    let (id, label) = stateNameAndLabel(inner)
+                    var (id, label) = stateNameAndLabel(inner)
+                    if let asRange = inner.range(of: " as ") {
+                        label = String(inner[..<asRange.lowerBound])
+                            .trimmingCharacters(in: .whitespaces)
+                            .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                        id = String(inner[asRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                    }
                     scopeCounter += 1
-                    let child = parseScope(scopeID: "s\(scopeCounter)_")
+                    let child = parseScope(scopeID: "s\(scopeCounter)_", opener: line)
                     nodes[id] = StateDiagram.Node(id: id, label: label, kind: .composite(child))
                     if !order.contains(id) { order.append(id) }
                     continue
@@ -1579,33 +1640,110 @@ public enum MermaidParser {
                         right = String(right[..<colon])
                     }
                     guard let from = endpoint(left, isSource: true),
-                          let to = endpoint(right, isSource: false) else { continue }
+                          let to = endpoint(right, isSource: false) else {
+                        ParseReport.note(.statementSetAside,
+                                         "couldn't read this transition's states; it is left out", line: line)
+                        continue
+                    }
                     edges.append(StateDiagram.Edge(from: from, to: to, label: label))
+                    continue
+                }
+
+                // `X : description` adds a description line to state X.
+                if let colon = line.firstIndex(of: ":") {
+                    var id = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
+                    if let styled = id.range(of: ":::") { id = String(id[..<styled.lowerBound]) }
+                    let text = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+                    if !id.isEmpty, id.allSatisfy(isStateIDCharacter), !line.contains(":::") {
+                        if let existing = nodes[id], existing.label != existing.id, !text.isEmpty {
+                            nodes[id]?.label = existing.label + "\n" + text
+                        } else {
+                            note(id: id, label: text.isEmpty ? id : text, kind: .simple)
+                        }
+                        continue
+                    }
+                }
+
+                // Concurrent regions share one layout; the divider isn't drawn.
+                if line == "--" {
+                    ParseReport.note(.unsupportedFeature,
+                                     "concurrent regions (`--`) are laid out together without a divider",
+                                     line: line)
                     continue
                 }
 
                 // Bare state id on its own line.
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if !trimmed.isEmpty, trimmed.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) {
-                    note(id: trimmed, label: trimmed, kind: .simple)
+                var bare = trimmed
+                if let styled = bare.range(of: ":::") { bare = String(bare[..<styled.lowerBound]) }
+                if !bare.isEmpty, bare.allSatisfy(isStateIDCharacter) {
+                    note(id: bare, label: bare, kind: .simple)
+                    continue
                 }
+
+                // Styling and display options are ignored on purpose.
+                if ["classDef", "class", "style", "hide", "scale", "click"].contains(where: { startsWithKeyword(line, $0) }) {
+                    continue
+                }
+                ParseReport.note(.statementSetAside,
+                                 "unrecognized state statement; it is left out of the diagram", line: line)
+            }
+
+            if let opener, !closed, unclosed == nil {
+                unclosed = (opener, "composite state block is never closed with `}`")
             }
 
             // Apply any annotations that arrived after a node was first seen.
             for (id, kind) in annotations where nodes[id] != nil {
                 nodes[id] = StateDiagram.Node(id: id, label: nodes[id]!.label == id ? id : nodes[id]!.label, kind: kind)
             }
+            // A note on a state never declared in its scope declares it.
+            for (i, item) in notes.enumerated() where nodes[item.target] == nil {
+                ParseReport.note(.invalidSyntax,
+                                 "note on undeclared state '\(item.target)': it is drawn as a new state, but mermaid.js fails to render it",
+                                 line: noteLines[i])
+                note(id: item.target, label: item.target, kind: .simple)
+            }
 
-            return StateDiagram(
+            var scope = StateDiagram(
                 direction: direction,
                 nodes: order.compactMap { nodes[$0] },
                 edges: edges
             )
+            scope.notes = notes
+            return scope
         }
 
-        let root = parseScope(scopeID: "root_")
+        let root = parseScope(scopeID: "root_", opener: nil)
+        if let unclosed {
+            ParseReport.reject(.invalidSyntax, unclosed.what, line: unclosed.line)
+            return nil
+        }
         guard !root.nodes.isEmpty else { return nil }
         return root
+    }
+
+    private static func isStateIDCharacter(_ c: Character) -> Bool {
+        c.isLetter || c.isNumber || c == "_"
+    }
+
+    /// `note left|right of X : text` → (X, side, text); the multi-line opener
+    /// `note left|right of X` → (X, side, nil). nil for any other note form.
+    private static func stateNote(_ line: String) -> (target: String, side: StateDiagram.Note.Side, text: String?)? {
+        var rest = Substring(line.dropFirst("note".count)).drop(while: { $0 == " " || $0 == "\t" })
+        let side: StateDiagram.Note.Side
+        if rest.lowercased().hasPrefix("left of ") { side = .left; rest = rest.dropFirst("left of ".count) }
+        else if rest.lowercased().hasPrefix("right of ") { side = .right; rest = rest.dropFirst("right of ".count) }
+        else { return nil }
+        var text: String?
+        var target = rest
+        if let colon = rest.firstIndex(of: ":") {
+            target = rest[..<colon]
+            text = rest[rest.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+        }
+        let id = target.trimmingCharacters(in: .whitespaces)
+        guard !id.isEmpty, id.allSatisfy(isStateIDCharacter) else { return nil }
+        return (id, side, text)
     }
 
     private static func detectStateDirection(_ body: [String]) -> Flowchart.Direction {

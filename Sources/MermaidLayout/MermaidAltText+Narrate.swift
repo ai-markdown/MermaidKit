@@ -85,7 +85,12 @@ extension MermaidAltText {
         let g = walk("The state machine", begin: "starts in",
                      ids: s.nodes.map(\.id),
                      edges: s.edges.map { Arc($0.from, $0.to, $0.label) }, noun: noun)
-        return g.isEmpty ? describe(.state(s)) : g
+        guard !g.isEmpty else { return describe(.state(s)) }
+        // Top-level notes, read after the walk.
+        let notes = s.notes.prefix(stepCap).map { note in
+            "A note on \(noun(note.target)) reads \(qt(DiagramLayoutEngine.flattenLines(note.text)))."
+        }
+        return ([g] + notes).joined(separator: " ")
     }
 
     private static func narrateER(_ e: ERDiagram) -> String {

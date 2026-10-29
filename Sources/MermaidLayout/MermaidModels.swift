@@ -156,9 +156,25 @@ public struct StateDiagram: Hashable, Sendable {
         public var label: String?
     }
 
+    /// A note attached beside a state (`note left|right of X : text`).
+    public struct Note: Hashable, Sendable {
+        public enum Side: String, Hashable, Sendable { case left, right }
+        /// Id of the state in the same scope the note is attached to.
+        public let target: String
+        public let side: Side
+        /// The note text; multi-line notes keep their lines joined by `\n`.
+        public var text: String
+        public init(target: String, side: Side, text: String) {
+            self.target = target; self.side = side; self.text = text
+        }
+    }
+
     public var direction: Flowchart.Direction
     public var nodes: [Node]
     public var edges: [Edge]
+    /// Notes declared in this scope, in source order. Notes inside a
+    /// composite belong to that composite's own diagram.
+    public var notes: [Note] = []
 }
 
 /// A Mermaid `sequenceDiagram`: participants (lifelines) exchanging an

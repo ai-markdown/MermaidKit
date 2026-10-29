@@ -771,12 +771,23 @@ public struct StateLayout: Sendable {
         public let labelAnchor: CGPoint?
     }
 
+    /// A note box beside its state, with a dashed leader from the state's
+    /// side to the note. `text` may hold `\n`/`<br>` line breaks.
+    public struct Note: Sendable {
+        public let text: String
+        public let frame: CGRect
+        /// Leader polyline from the target state's border to the note.
+        public let leader: [CGPoint]
+    }
+
     public let size: CGSize
     public let nodes: [Node]
     /// Composite boxes; a parent always precedes its nested children, so
     /// drawing in order paints outer boxes behind inner ones.
     public let containers: [Container]
     public let edges: [Edge]
+    /// Notes, placed in a column beside their scope's content.
+    public var notes: [Note] = []
 }
 
 // MARK: - Engine

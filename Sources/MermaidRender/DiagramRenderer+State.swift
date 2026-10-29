@@ -72,6 +72,23 @@ extension DiagramRenderer {
             }
         }
 
+        // Notes: dashed leaders, then tinted boxes with their (multi-line) text.
+        let noteHue = theme.categoricalColor(2)
+        for note in layout.notes {
+            context.saveGState()
+            context.setStrokeColor(resolvedCGColor(stroke))
+            context.setLineWidth(1)
+            context.setLineDash(phase: 0, lengths: [4, 3])   // the scene's dash
+            context.beginPath()
+            context.addLines(between: note.leader)
+            context.strokePath()
+            context.restoreGState()
+            fillStrokeBox(note.frame, radius: 3, fill: noteHue.withAlphaComponent(0.18),
+                          stroke: noteHue, in: context)
+            drawText(note.text, center: CGPoint(x: note.frame.midX, y: note.frame.midY),
+                     size: labelSize, color: theme.ink, in: context)
+        }
+
         // Nodes on top so borders sit above the edge ends.
         for node in layout.nodes {
             context.saveGState()

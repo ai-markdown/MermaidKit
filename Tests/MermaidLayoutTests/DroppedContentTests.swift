@@ -187,5 +187,112 @@ final class DroppedContentTests: XCTestCase {
             XCTAssertEqual(MermaidParser.diagnose(source).first?.code, .invalidSyntax, source)
         }
     }
+
+    // MARK: State
+
+    func testStateNotesAreParsedLaidOutAndDrawn() throws {
+        let source = """
+        stateDiagram-v2
+          [*] --> Idle
+          Idle --> Running : start
+          Running --> Done
+          Running --> Failed : error
+          note right of Idle : waiting
+          note left of Failed
+            something went wrong
+            word
+          end note
+          Note right of Done : finished
+          note left of Idle : left side
+          state Running {
+            a --> b
+            note right of b : inner note
+          }
+        """
+        let diagram = try XCTUnwrap(MermaidParser.parse(source))
+        guard case .state(let state) = diagram else { return XCTFail("expected state") }
+        XCTAssertEqual(MermaidParser.diagnose(source), [])
+        XCTAssertFalse(state.nodes.contains { $0.id == "word" || $0.id == "end" }, "note body leaked into states")
+        XCTAssertEqual(state.notes.map(\.target), ["Idle", "Failed", "Done", "Idle"])
+        XCTAssertEqual(state.notes.map(\.side), [.right, .left, .right, .left])
+        XCTAssertEqual(state.notes[1].text, "something went wrong\nword")
+        guard case .composite(let running)? = state.nodes.first(where: { $0.id == "Running" })?.kind else {
+            return XCTFail("expected the Running composite")
+        }
+        XCTAssertEqual(running.notes, [.init(target: "b", side: .right, text: "inner note")])
+
+        let layout = DiagramLayoutEngine.layout(state, measure: measure)
+        XCTAssertEqual(layout.notes.count, 5)
+        let canvas = CGRect(origin: .zero, size: layout.size)
+        for (i, note) in layout.notes.enumerated() {
+            XCTAssertTrue(canvas.contains(note.frame), "note \(i) is off the canvas")
+            for node in layout.nodes {
+                XCTAssertFalse(note.frame.intersects(node.frame), "note \(i) overlaps state \(node.id)")
+            }
+            for other in layout.notes[(i + 1)...] {
+                XCTAssertFalse(note.frame.intersects(other.frame), "notes overlap")
+            }
+        }
+        // Root-scope notes stay outside the composite box.
+        let running_ = try XCTUnwrap(layout.containers.first)
+        for note in layout.notes where note.text != "inner note" {
+            XCTAssertFalse(note.frame.intersects(running_.frame), "\(note.text) overlaps the composite")
+        }
+        XCTAssertTrue(running_.frame.contains(try XCTUnwrap(layout.notes.first { $0.text == "inner note" }).frame))
+
+        XCTAssertTrue(MermaidAltText.narrate(diagram).contains("waiting"), "notes are narrated")
+
+        let texts = try sceneTexts(diagram)
+        let svg = try svg(diagram)
+        for text in ["waiting", "something went wrong", "word", "finished", "left side", "inner note"] {
+            XCTAssertTrue(texts.contains(text), "\(text) missing from the scene")
+            XCTAssertTrue(svg.contains(">\(text)<"), "\(text) missing from the SVG")
+        }
+    }
+
+    func testStateNoteOnUndeclaredStateDeclaresIt() throws {
+        let source = "stateDiagram-v2\n  A --> B\n  note left of Z : creates Z"
+        guard case .state(let state) = try XCTUnwrap(MermaidParser.parse(source)) else { return XCTFail() }
+        XCTAssertTrue(state.nodes.contains { $0.id == "Z" })
+        XCTAssertEqual(state.notes.count, 1)
+        XCTAssertEqual(MermaidParser.diagnose(source).map(\.code), [.invalidSyntax])
+    }
+
+    func testStateUnclosedBlocksAreRejected() {
+        for source in ["stateDiagram-v2\n  state X {\n    a --> b",
+                       "stateDiagram-v2\n  A --> B\n  note left of B\n    text"] {
+            XCTAssertNil(MermaidParser.parse(source), source)
+            let diagnostics = MermaidParser.diagnose(source)
+            XCTAssertEqual(diagnostics.first?.severity, .error, source)
+            XCTAssertEqual(diagnostics.first?.code, .invalidSyntax, source)
+            XCTAssertEqual(diagnostics.first?.line, 3 - (source.contains("state X") ? 1 : 0), source)
+        }
+    }
+
+    func testStateStrayBraceDoesNotEndTheDiagram() throws {
+        let source = "stateDiagram-v2\n  A --> B\n  }\n  B --> C"
+        guard case .state(let state) = try XCTUnwrap(MermaidParser.parse(source)) else { return XCTFail() }
+        XCTAssertEqual(state.nodes.map(\.id), ["A", "B", "C"])
+        XCTAssertEqual(MermaidParser.diagnose(source).map(\.code), [.invalidSyntax])
+    }
+
+    func testStateDescriptionsStyledEndpointsAndHistory() throws {
+        let source = """
+        stateDiagram-v2
+          A : first line
+          A : second line
+          A:::hot --> B
+          classDef hot fill:#f00
+          state B {
+            [H] --> x
+          }
+        """
+        guard case .state(let state) = try XCTUnwrap(MermaidParser.parse(source)) else { return XCTFail() }
+        XCTAssertEqual(state.nodes.first { $0.id == "A" }?.label, "first line\nsecond line")
+        XCTAssertEqual(state.edges.map(\.from), ["A"])
+        guard case .composite(let b)? = state.nodes.first(where: { $0.id == "B" })?.kind else { return XCTFail() }
+        XCTAssertEqual(b.edges.count, 1)
+        XCTAssertEqual(MermaidParser.diagnose(source), [])
+    }
 }
 

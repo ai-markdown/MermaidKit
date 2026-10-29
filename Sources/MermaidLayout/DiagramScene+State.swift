@@ -20,6 +20,19 @@ extension DiagramScene {
             DiagramScene.Node(id: container.label, frame: container.frame, isContainer: true)
         })
 
+        // Note boxes are plain nodes so overlap checks see them; their text
+        // is a label inside the box. Leaders are decorations, not edges.
+        nodes.append(contentsOf: layout.notes.enumerated().map { index, note in
+            DiagramScene.Node(id: "note\(index)", frame: note.frame, isContainer: false)
+        })
+        let noteLabels: [DiagramScene.Label] = layout.notes.map { note in
+            let size = measuredLabelSize(measure, note.text)
+            return DiagramScene.Label(
+                text: note.text,
+                frame: CGRect(x: note.frame.midX - size.width / 2, y: note.frame.midY - size.height / 2,
+                              width: size.width, height: size.height))
+        }
+
         // Transitions: prefer the routed polyline; fall back to the straight
         // start→end segment when the layout stored no waypoints.
         let edges: [DiagramScene.Edge] = layout.edges.map { edge in
@@ -58,7 +71,7 @@ extension DiagramScene {
             size: layout.size,
             nodes: nodes,
             edges: edges,
-            labels: labels + compositeTitles
+            labels: labels + compositeTitles + noteLabels
         )
     }
 

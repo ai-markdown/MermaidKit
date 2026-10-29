@@ -59,7 +59,20 @@ extension RenderScene {
                 color: theme.secondaryText, backing: theme.canvas)))
         }
 
-        // 4. Node glyphs on top so their borders sit above the edge ends.
+        // 4. Notes: a dashed leader, then the tinted box and its text.
+        let noteHue = theme.categoricalColor(2)
+        for note in layout.notes {
+            elements.append(.polyline(Polyline(
+                points: note.leader, stroke: Stroke(color: stroke, width: 1, dashed: true))))
+            elements.append(.shape(Shape(
+                path: .roundedRect(note.frame, radius: 3),
+                fill: noteHue.withAlpha(0.18), stroke: Stroke(color: noteHue, width: 1))))
+            elements.append(.text(Text(
+                string: note.text, center: CGPoint(x: note.frame.midX, y: note.frame.midY),
+                fontSize: 10.5, color: theme.ink)))
+        }
+
+        // 5. Node glyphs on top so their borders sit above the edge ends.
         for node in layout.nodes {
             let f = node.frame
             switch node.kind {
