@@ -140,8 +140,16 @@ public enum MermaidParser {
         return (diagram, metadata)
     }
 
-    /// Dispatches an already-metadata-stripped body to the per-dialect parsers.
+    /// Dispatches an already-metadata-stripped body to the per-dialect
+    /// parsers, then (only while diagnostics are being collected) notes
+    /// constructs mermaid.js rejects but this parser renders leniently.
     private static func parseBody(_ source: String) -> MermaidDiagram? {
+        let diagram = parseBodyUnchecked(source)
+        if let diagram, ParseReport.sink != nil { reportCompatibilityNotes(diagram, body: source) }
+        return diagram
+    }
+
+    private static func parseBodyUnchecked(_ source: String) -> MermaidDiagram? {
         let lines = source
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -2032,8 +2040,8 @@ public enum MermaidParser {
                 }
                 continue // malformed note: skip, never a phantom message
             }
-            // Combined fragments: a tolerant stack machine. Unclosed frames
-            // close at end-of-diagram; a stray `end` is ignored.
+            // Combined fragments: a stack machine. As in mermaid.js 11.17.2,
+            // an unclosed frame or box and a stray `end` fail the diagram.
             let keyword = line.split(separator: " ").first.map(String.init) ?? line
             if let kind = SequenceDiagram.Fragment.Kind(rawValue: keyword) {
                 let label = line.count > keyword.count
@@ -2061,6 +2069,9 @@ public enum MermaidParser {
                     openBox = nil
                 } else if let top = openFragments.popLast() {
                     events.append(.close(top))
+                } else {
+                    ParseReport.reject(.invalidSyntax, "'end' has no open block (loop, alt, opt, par, critical, break, rect, box) to close", line: line)
+                    return nil
                 }
                 continue
             }
@@ -2126,7 +2137,9 @@ public enum MermaidParser {
                 guard let range = line.range(of: token) else { continue }
                 var from = String(line[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
                 let remainder = String(line[range.upperBound...])
-                let pieces = remainder.split(separator: ":", maxSplits: 1)
+                // Keep the empty piece: `A->>: text` has NO target; omitting
+                // empty pieces made the message text the target.
+                let pieces = remainder.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
                 var to = pieces.first.map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
                 let text = pieces.count > 1 ? String(pieces[1]).trimmingCharacters(in: .whitespaces) : ""
                 // Activation shorthand: `A->>+B:` / `B->>-A:` — the +/- binds
@@ -2139,7 +2152,10 @@ public enum MermaidParser {
                 if to.hasPrefix("-") { deactivates = true }   // `->>-A:` deactivates the RECEIVER-side sender form below
                 if to.hasPrefix("+") || to.hasPrefix("-") { to = String(to.dropFirst()).trimmingCharacters(in: .whitespaces) }
                 if from.hasSuffix("+") || from.hasSuffix("-") { from = String(from.dropLast()).trimmingCharacters(in: .whitespaces) }
-                guard !from.isEmpty, !to.isEmpty else { break }
+                guard !from.isEmpty, !to.isEmpty else {
+                    ParseReport.reject(.invalidSyntax, "message '\(line)' is missing its \(from.isEmpty ? "sender" : "receiver")", line: line)
+                    return nil
+                }
                 var number: Int?
                 if let next = autonumber {
                     number = next
@@ -2167,9 +2183,14 @@ public enum MermaidParser {
         }
 
         guard !participants.isEmpty else { return nil }
-        // Close any unclosed frames (author forgot `end`): tolerant, not fatal.
-        while let top = openFragments.popLast() { events.append(.close(top)) }
-        if let box = openBox { boxes.append(.init(label: box.label, memberIDs: box.members)) }
+        if let top = openFragments.last {
+            ParseReport.reject(.invalidSyntax, "'\(fragments[top].kind.rawValue)' block is never closed with 'end'")
+            return nil
+        }
+        if openBox != nil {
+            ParseReport.reject(.invalidSyntax, "'box' is never closed with 'end'")
+            return nil
+        }
         return SequenceDiagram(
             participants: order.compactMap { id -> SequenceDiagram.Participant? in
                 guard var participant = participants[id] else { return nil }

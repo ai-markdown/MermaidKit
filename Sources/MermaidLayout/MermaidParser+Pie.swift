@@ -20,14 +20,40 @@ extension MermaidParser {
         var slices: [PieChart.Slice] = []
         for line in lines {
             // "Label" : 42.5
-            guard let colon = line.lastIndex(of: ":") else { continue }
+            guard let colon = line.lastIndex(of: ":") else {
+                if line != "showData" {
+                    ParseReport.note(.invalidSyntax, "pie statement '\(line)' is not a slice and was ignored; mermaid.js rejects it", line: line)
+                }
+                continue
+            }
             let rawLabel = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
             let label = rawLabel.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
             let valueText = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
-            guard !label.isEmpty, let value = MermaidParser.finiteDouble(valueText), value >= 0 else { continue }
+            // mermaid.js 11.17.2 requires a double-quoted label and a plain
+            // non-negative decimal (`\d+(\.\d+)?`: no sign, exponent, or
+            // leading dot); anything else fails the whole diagram.
+            guard rawLabel.count >= 2, rawLabel.hasPrefix("\""), rawLabel.hasSuffix("\""), !label.isEmpty else {
+                ParseReport.reject(.invalidSyntax, "pie slice label must be double-quoted: '\(line)'", line: line)
+                return nil
+            }
+            guard isPlainDecimal(valueText), let value = MermaidParser.finiteDouble(valueText) else {
+                ParseReport.reject(.invalidSyntax,
+                                   "pie slice value must be a non-negative decimal number: '\(line)'", line: line)
+                return nil
+            }
+            if value >= 1e12 {
+                ParseReport.note(.valueClamped, "pie slice value '\(valueText)' was clamped to 1e12", line: line)
+            }
             slices.append(PieChart.Slice(label: label, value: value))
         }
         guard !slices.isEmpty else { return nil }
         return PieChart(title: title, slices: slices)
+    }
+
+    /// `\d+(\.\d+)?` — the number token mermaid.js's pie grammar accepts.
+    static func isPlainDecimal(_ text: String) -> Bool {
+        let parts = text.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+        let digits: (Substring) -> Bool = { !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }
+        return digits(parts[0]) && (parts.count == 1 || digits(parts[1]))
     }
 }

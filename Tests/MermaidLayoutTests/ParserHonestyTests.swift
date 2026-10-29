@@ -1226,11 +1226,12 @@ extension ParserHonestyTests {
         XCTAssertLessThan(alt.dividers[0].y, alt.rect.maxY)
     }
 
-    func testUnclosedFragmentIsTolerated() throws {
-        let s = try seqPub("A->>B: x\nloop forever\nB->>A: y")
-        XCTAssertEqual(s.fragments.count, 1)
-        XCTAssertEqual(s.events.filter { if case .close = $0 { return true }; return false }.count, 1,
-                       "missing 'end' closes at end-of-diagram")
+    /// mermaid.js 11.17.2 fails a sequence with an unclosed block, so this
+    /// parser rejects it too (it used to close it silently at end of input).
+    func testUnclosedFragmentIsRejectedWithDiagnostic() throws {
+        let source = "sequenceDiagram\nA->>B: x\nloop forever\nB->>A: y"
+        XCTAssertNil(MermaidParser.parse(source))
+        XCTAssertEqual(MermaidParser.diagnose(source).map(\.code), [.invalidSyntax])
     }
 }
 
