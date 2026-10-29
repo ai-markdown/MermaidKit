@@ -48,7 +48,7 @@ extension RenderScene {
                 path: .roundedRect(box.frame, radius: 4), fill: fill,
                 stroke: Stroke(color: stroke, width: 1))))
             elements.append(.text(Text(
-                string: box.name,
+                string: box.title,
                 center: CGPoint(x: box.frame.midX, y: box.frame.minY + box.nameHeight / 2),
                 fontSize: 12, weight: .semibold, color: theme.ink)))
 
@@ -78,8 +78,15 @@ extension RenderScene {
                     let badgeWidth = measure(badge, 10.5).width
                     elements.append(.text(Text(
                         string: badge,
-                        center: CGPoint(x: box.frame.maxX - 10 - badgeWidth / 2, y: center),
+                        center: CGPoint(x: box.badgeRightX - badgeWidth / 2, y: center),
                         fontSize: 10.5, weight: .semibold, color: theme.secondaryText)))
+                }
+                if let comment = attribute.comment, !comment.isEmpty {
+                    let commentWidth = measure(comment, 10.5).width
+                    elements.append(.text(Text(
+                        string: comment,
+                        center: CGPoint(x: box.commentX + commentWidth / 2, y: center),
+                        fontSize: 10.5, color: theme.secondaryText)))
                 }
                 rowY += box.rowHeight
             }

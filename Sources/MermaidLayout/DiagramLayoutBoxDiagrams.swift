@@ -115,12 +115,18 @@ extension DiagramLayoutEngine {
         let compartmentNameHeight = grown(Self.compartmentNameHeight, fontSize: nodeFontSize, measure)
         let compartmentRowHeight = grown(Self.compartmentRowHeight, fontSize: labelFontSize, measure)
         var boxSizes: [String: CGSize] = [:]
+        var commentWidths: [String: CGFloat] = [:]
         for entity in diagram.entities {
-            var width = measure(entity.name, nodeFontSize).width + compartmentPadX * 2 + 8
+            var width = measure(entity.displayName, nodeFontSize).width + compartmentPadX * 2 + 8
+            // Comments form their own right-hand column, as in mermaid.js.
+            let commentWidth = entity.attributes.compactMap(\.comment).filter { !$0.isEmpty }
+                .map { measure($0, labelFontSize).width }.max() ?? 0
+            commentWidths[entity.name] = commentWidth
             for attribute in entity.attributes {
                 let badge = attribute.keyBadge.isEmpty ? "" : "   \(attribute.keyBadge)"
                 let row = "\(attribute.type)  \(attribute.name)\(badge)"
-                width = max(width, measure(row, labelFontSize).width + compartmentPadX * 2)
+                let comment = commentWidth > 0 ? commentWidth + 10 : 0
+                width = max(width, measure(row, labelFontSize).width + compartmentPadX * 2 + comment)
             }
             var height = compartmentNameHeight
             if !entity.attributes.isEmpty {
@@ -148,7 +154,8 @@ extension DiagramLayoutEngine {
             guard let frame = frames[entity.name] else { return nil }
             return ERLayout.Box(
                 name: entity.name, attributes: entity.attributes,
-                frame: frame, nameHeight: compartmentNameHeight, rowHeight: compartmentRowHeight
+                frame: frame, nameHeight: compartmentNameHeight, rowHeight: compartmentRowHeight,
+                alias: entity.alias, commentColumnWidth: commentWidths[entity.name] ?? 0
             )
         }
 

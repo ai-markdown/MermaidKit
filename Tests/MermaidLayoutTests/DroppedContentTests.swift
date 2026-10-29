@@ -117,4 +117,75 @@ final class DroppedContentTests: XCTestCase {
             }
         }
     }
+
+    // MARK: ER
+
+    func testERKeysAndCommentsAreParsedAndDrawn() throws {
+        let source = """
+        erDiagram
+          CUSTOMER ||--o{ ORDER : places
+          CUSTOMER {
+            string name PK
+            string email UK "login"
+            int org FK
+            int both PK, FK "composite key"
+            int tight fk,pk
+            int note "just a comment"
+            varchar(255) plain
+          }
+        """
+        let diagram = try XCTUnwrap(MermaidParser.parse(source))
+        guard case .er(let er) = diagram else { return XCTFail("expected er") }
+        let attributes = try XCTUnwrap(er.entities.first { $0.name == "CUSTOMER" }).attributes
+        XCTAssertEqual(attributes.map(\.name), ["name", "email", "org", "both", "tight", "note", "plain"])
+        XCTAssertEqual(attributes.map(\.keys), [[.primary], [.unique], [.foreign], [.primary, .foreign],
+                                                [.foreign, .primary], [], []])
+        XCTAssertEqual(attributes.map(\.comment), [nil, "login", nil, "composite key", nil, "just a comment", nil])
+        XCTAssertEqual(attributes.last?.type, "varchar(255)")
+        XCTAssertEqual(MermaidParser.diagnose(source), [])
+
+        let svg = try svg(diagram)
+        for text in ["PK", "UK", "FK", "PK,FK", "FK,PK", "login", "composite key", "just a comment"] {
+            XCTAssertTrue(svg.contains(">\(text)<"), "\(text) missing from the SVG")
+        }
+        // The comment column sits right of every badge and inside the box.
+        let layout = DiagramLayoutEngine.layout(er, measure: measure)
+        let box = try XCTUnwrap(layout.boxes.first { $0.name == "CUSTOMER" })
+        XCTAssertGreaterThan(box.commentColumnWidth, 0)
+        XCTAssertLessThan(box.badgeRightX, box.commentX)
+        XCTAssertLessThanOrEqual(box.commentX + box.commentColumnWidth, box.frame.maxX)
+    }
+
+    func testERWordRelationshipsAliasesAndBareEntities() throws {
+        let source = """
+        erDiagram
+          PRODUCT one or more to zero or more LINE_ITEM : appears
+          A only one optionally to many(0) B : x
+          p["Person"] {
+            string name
+          }
+          p ||--o{ A : owns
+          LONELY
+        """
+        guard case .er(let er) = try XCTUnwrap(MermaidParser.parse(source)) else { return XCTFail("expected er") }
+        XCTAssertEqual(er.entities.map(\.name), ["PRODUCT", "LINE_ITEM", "A", "B", "p", "LONELY"])
+        XCTAssertEqual(er.entities.first { $0.name == "p" }?.displayName, "Person")
+        XCTAssertEqual(er.relations.count, 3)
+        XCTAssertEqual(er.relations[0].fromCard, .oneOrMore)
+        XCTAssertEqual(er.relations[0].toCard, .zeroOrMore)
+        XCTAssertTrue(er.relations[0].identifying)
+        XCTAssertFalse(er.relations[1].identifying)
+        XCTAssertTrue(try svg(.er(er)).contains(">Person<"))
+    }
+
+    func testERRejectsMalformedAttributeRows() {
+        for source in ["erDiagram\n  A {\n    int a XX\n  }",
+                       "erDiagram\n  A {\n    int\n  }",
+                       "erDiagram\n  A {\n    int a \"c\" PK\n  }",
+                       "erDiagram\n  A {\n    int a"] {
+            XCTAssertNil(MermaidParser.parse(source), source)
+            XCTAssertEqual(MermaidParser.diagnose(source).first?.code, .invalidSyntax, source)
+        }
+    }
 }
+

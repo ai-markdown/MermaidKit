@@ -696,6 +696,21 @@ public struct ERLayout: Sendable {
         public let nameHeight: CGFloat
         /// Height of each attribute row.
         public let rowHeight: CGFloat
+        /// The entity's `name[Alias]` display name, if any.
+        public var alias: String? = nil
+        /// Text of the name compartment (the alias, else the name).
+        public var title: String { alias ?? name }
+        /// Width of the right-aligned comment column (the widest attribute
+        /// comment); 0 when no attribute has a comment. Comments start at
+        /// `frame.maxX - 10 - commentColumnWidth`; key badges end 10pt
+        /// before that column.
+        public var commentColumnWidth: CGFloat = 0
+        /// Where a row's key badge ends (right-aligned).
+        public var badgeRightX: CGFloat {
+            frame.maxX - 10 - (commentColumnWidth > 0 ? commentColumnWidth + 10 : 0)
+        }
+        /// Where a row's comment starts (left-aligned).
+        public var commentX: CGFloat { frame.maxX - 10 - commentColumnWidth }
     }
 
     /// A relationship; cardinality markers sit at both ends.

@@ -366,11 +366,13 @@ public struct ERDiagram: Hashable, Sendable {
         }
         public let type: String
         public let name: String
-        /// Key constraints; empty for a plain attribute. Populated by the
-        /// SQL-DDL front-end (Mermaid `erDiagram` leaves it empty for now).
+        /// Key constraints in source order; empty for a plain attribute.
         public var keys: [Key]
-        public init(type: String, name: String, keys: [Key] = []) {
-            self.type = type; self.name = name; self.keys = keys
+        /// The row's trailing `"comment"`, drawn as an extra column; nil when
+        /// the row has none.
+        public var comment: String?
+        public init(type: String, name: String, keys: [Key] = [], comment: String? = nil) {
+            self.type = type; self.name = name; self.keys = keys; self.comment = comment
         }
         /// Compact badge text (`"PK"`, `"FK"`, `"PK,FK"`); empty when no keys.
         public var keyBadge: String { keys.map(\.rawValue).joined(separator: ",") }
@@ -382,6 +384,10 @@ public struct ERDiagram: Hashable, Sendable {
         public var id: String { name }
         public let name: String
         public var attributes: [Attribute]
+        /// Display name from `name[Alias]`; nil to show `name`.
+        public var alias: String? = nil
+        /// The text drawn in the entity's name compartment.
+        public var displayName: String { alias ?? name }
     }
 
     /// A relationship between two entity names in `entities`.

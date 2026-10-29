@@ -46,7 +46,7 @@ extension DiagramRenderer {
         for box in layout.boxes {
             fillStrokeBox(box.frame, radius: 4, fill: fill, stroke: stroke, in: context)
 
-            drawText(box.name,
+            drawText(box.title,
                      center: CGPoint(x: box.frame.midX, y: box.frame.minY + box.nameHeight / 2),
                      size: 12, weight: .semibold, color: theme.ink, in: context)
 
@@ -66,8 +66,12 @@ extension DiagramRenderer {
                     let badge = attribute.keyBadge
                     if !badge.isEmpty {
                         let badgeWidth = measure(badge, size: 10.5).width
-                        drawTextLeft(badge, at: CGPoint(x: box.frame.maxX - 10 - badgeWidth, y: center),
+                        drawTextLeft(badge, at: CGPoint(x: box.badgeRightX - badgeWidth, y: center),
                                      size: 10.5, weight: .semibold, color: theme.secondaryTextColor, in: context)
+                    }
+                    if let comment = attribute.comment, !comment.isEmpty {
+                        drawTextLeft(comment, at: CGPoint(x: box.commentX, y: center),
+                                     size: 10.5, color: theme.secondaryTextColor, in: context)
                     }
                     rowY += box.rowHeight
                 }

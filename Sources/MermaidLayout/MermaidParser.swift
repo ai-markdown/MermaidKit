@@ -1833,85 +1833,214 @@ public enum MermaidParser {
 
     // MARK: ER
 
+    /// erDiagram → entities and relationships. Entity blocks hold attribute
+    /// rows `type name [PK|FK|UK[, …]] ["comment"]`; relationships use either
+    /// crow's-foot symbols (`A ||--o{ B : label`, `..`/`.-`/`-.` for
+    /// non-identifying) or mermaid's word form
+    /// (`A one or more optionally to zero or many B : label`). A bare entity
+    /// name declares an entity. Malformed attribute rows reject the diagram,
+    /// as mermaid.js does; statements the parser can't read are reported.
     static func parseER(body: [String]) -> ERDiagram? {
         var entities: [String: ERDiagram.Entity] = [:]
         var order: [String] = []
         var relations: [ERDiagram.Relation] = []
         var openEntity: String?
+        var openLine = ""
 
-        func note(_ name: String) {
-            guard !name.isEmpty, entities[name] == nil else { return }
-            entities[name] = ERDiagram.Entity(name: name, attributes: [])
-            order.append(name)
+        /// `NAME`, `NAME:::class`, `"Quoted name"`, `id[Alias]` or `id["Alias"]`
+        /// → (id, alias); nil when the text isn't a single entity reference.
+        func entityReference(_ written: String) -> (id: String, alias: String?)? {
+            var text = written.trimmingCharacters(in: .whitespaces)
+            if let styled = text.range(of: ":::") { text = String(text[..<styled.lowerBound]) }
+            var alias: String?
+            if text.hasSuffix("]"), let open = text.firstIndex(of: "[") {
+                alias = String(text[text.index(after: open)..<text.index(before: text.endIndex)])
+                    .trimmingCharacters(in: .whitespaces)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                text = String(text[..<open]).trimmingCharacters(in: .whitespaces)
+            }
+            if text.count >= 2, text.hasPrefix("\""), text.hasSuffix("\"") {
+                text = String(text.dropFirst().dropLast())
+            } else if text.contains(where: { $0 == " " || $0 == "\t" || $0 == "\"" }) {
+                return nil
+            }
+            guard !text.isEmpty else { return nil }
+            return (text, alias)
         }
 
-        func cardinality(_ token: String) -> ERDiagram.Cardinality? {
-            // Left-side tokens read outward (||, |o, }o, }|); right-side
-            // tokens are mirrored (||, o|, o{, |{). Normalize both.
-            switch token {
-            case "||": return .one
-            case "|o", "o|": return .zeroOrOne
-            case "}|", "|{": return .oneOrMore
-            case "}o", "o{": return .zeroOrMore
-            default: return nil
+        @discardableResult
+        func declare(_ reference: (id: String, alias: String?)) -> String {
+            if entities[reference.id] == nil {
+                entities[reference.id] = ERDiagram.Entity(name: reference.id, attributes: [])
+                order.append(reference.id)
             }
+            if let alias = reference.alias, !alias.isEmpty { entities[reference.id]?.alias = alias }
+            return reference.id
+        }
+
+        /// Reads attribute rows from `text` (one row per line, or several on
+        /// a single-line `NAME { … }` block). nil when a row is malformed.
+        func attributes(in text: String) -> [ERDiagram.Attribute]? {
+            guard let tokens = cynefinTokens(text) else { return nil }
+            var out: [ERDiagram.Attribute] = []
+            var i = 0
+            func keyList(_ word: String) -> [ERDiagram.Attribute.Key]? {
+                let parts = word.split(separator: ",", omittingEmptySubsequences: true)
+                guard !parts.isEmpty || word.allSatisfy({ $0 == "," }) else { return nil }
+                var keys: [ERDiagram.Attribute.Key] = []
+                for part in parts {
+                    guard let key = ERDiagram.Attribute.Key(rawValue: part.uppercased()) else { return nil }
+                    keys.append(key)
+                }
+                return keys
+            }
+            while i < tokens.count {
+                guard case .word(let type) = tokens[i], i + 1 < tokens.count,
+                      case .word(let name) = tokens[i + 1] else { return nil }
+                i += 2
+                var keys: [ERDiagram.Attribute.Key] = []
+                var sawKey = false
+                while i < tokens.count, case .word(let word) = tokens[i], let more = keyList(word) {
+                    // A bare comma only continues a list already started.
+                    if more.isEmpty && !sawKey { break }
+                    keys += more
+                    sawKey = sawKey || !more.isEmpty
+                    i += 1
+                }
+                var comment: String?
+                if i < tokens.count, case .quoted(let text) = tokens[i] {
+                    comment = text
+                    i += 1
+                }
+                out.append(ERDiagram.Attribute(type: type, name: name, keys: keys, comment: comment))
+            }
+            return out
+        }
+
+        func rejectRow(_ line: String) -> ERDiagram? {
+            ParseReport.reject(.invalidSyntax,
+                               "an ER attribute row is `type name [PK|FK|UK[, …]] [\"comment\"]`",
+                               line: line)
+            return nil
         }
 
         for line in body {
             if let current = openEntity {
                 if line == "}" { openEntity = nil; continue }
-                let parts = line.split(separator: " ", omittingEmptySubsequences: true)
-                if parts.count >= 2 {
-                    entities[current]?.attributes.append(
-                        ERDiagram.Attribute(type: String(parts[0]), name: String(parts[1]))
-                    )
+                var rows = line
+                let closes = rows.hasSuffix("}")
+                if closes { rows = String(rows.dropLast()) }
+                guard let parsed = attributes(in: rows) else { return rejectRow(line) }
+                entities[current]?.attributes += parsed
+                if closes { openEntity = nil }
+                continue
+            }
+            // `NAME {` opens a block; `NAME { int a }` is a whole one-line block.
+            if let brace = line.firstIndex(of: "{"), !line.contains("--"), !line.contains(".."),
+               !line.contains(".-"), !line.contains("-."),
+               let reference = entityReference(String(line[..<brace])) {
+                let id = declare(reference)
+                var rest = String(line[line.index(after: brace)...]).trimmingCharacters(in: .whitespaces)
+                if rest.hasSuffix("}") {
+                    rest = String(rest.dropLast())
+                    guard let parsed = attributes(in: rest) else { return rejectRow(line) }
+                    entities[id]?.attributes += parsed
+                } else if rest.isEmpty {
+                    openEntity = id
+                    openLine = line
+                } else {
+                    return rejectRow(line)
                 }
                 continue
             }
-            if line.hasSuffix("{"), !line.contains("--"), !line.contains("..") {
-                let name = String(line.dropLast()).trimmingCharacters(in: .whitespaces)
-                if !name.isEmpty {
-                    note(name)
-                    openEntity = name
+            if let relation = erRelation(line) {
+                guard let from = entityReference(relation.from), let to = entityReference(relation.to) else {
+                    ParseReport.note(.statementSetAside, "couldn't read the entities of this relationship", line: line)
+                    continue
                 }
-                continue
-            }
-
-            // A ||--o{ B : label   (also `..` for non-identifying)
-            for separator in ["--", ".."] {
-                guard let range = line.range(of: separator) else { continue }
-                let left = String(line[..<range.lowerBound])
-                var right = String(line[range.upperBound...])
-                guard left.count >= 2, right.count >= 2 else { continue }
-                let leftCardToken = String(left.suffix(2))
-                let rightCardToken = String(right.prefix(2))
-                guard let fromCard = cardinality(leftCardToken),
-                      let toCard = cardinality(rightCardToken)
-                else { continue }
-                let from = String(left.dropLast(2)).trimmingCharacters(in: .whitespaces)
-                right = String(right.dropFirst(2))
-                var label = ""
-                if let colon = right.firstIndex(of: ":") {
-                    label = String(right[right.index(after: colon)...])
-                        .trimmingCharacters(in: .whitespaces)
-                        .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-                    right = String(right[..<colon])
+                if relation.label == nil {
+                    ParseReport.note(.invalidSyntax,
+                                     "mermaid.js requires a relationship label (`: label`)", line: line)
                 }
-                let to = right.trimmingCharacters(in: .whitespaces)
-                guard !from.isEmpty, !to.isEmpty else { continue }
-                note(from)
-                note(to)
+                if relation.parentMarker {
+                    ParseReport.note(.unsupportedFeature,
+                                     "the `u` (parent) cardinality is drawn as exactly one", line: line)
+                }
                 relations.append(ERDiagram.Relation(
-                    from: from, to: to,
-                    fromCard: fromCard, toCard: toCard,
-                    label: label, identifying: separator == "--"
+                    from: declare(from), to: declare(to),
+                    fromCard: relation.fromCard, toCard: relation.toCard,
+                    label: relation.label ?? "", identifying: relation.identifying
                 ))
-                break
+                continue
             }
+            // Styling statements are ignored on purpose.
+            if startsWithKeyword(line, "classDef") || startsWithKeyword(line, "class")
+                || startsWithKeyword(line, "style") { continue }
+            if startsWithKeyword(line, "direction") {
+                ParseReport.note(.unsupportedFeature,
+                                 "ER `direction` is not supported; entities are laid out top-down", line: line)
+                continue
+            }
+            if let reference = entityReference(line) {
+                declare(reference)
+                continue
+            }
+            ParseReport.note(.statementSetAside, "unrecognized ER statement; it is left out of the diagram",
+                             line: line)
+        }
+        if openEntity != nil {
+            ParseReport.reject(.invalidSyntax, "entity block is never closed with `}`", line: openLine)
+            return nil
         }
 
         guard !entities.isEmpty else { return nil }
         return ERDiagram(entities: order.compactMap { entities[$0] }, relations: relations)
+    }
+
+    private struct ERRelationSyntax {
+        var from: String, to: String
+        var fromCard: ERDiagram.Cardinality, toCard: ERDiagram.Cardinality
+        var identifying: Bool
+        var label: String?
+        var parentMarker: Bool
+    }
+
+    private static let erSymbolRelation = try? NSRegularExpression(pattern:
+        #"^(.+?)\s*(\|o|o\||\}o|o\{|\}\||\|\{|\|\||(?<=\s)u)(--|\.\.|\.-|-\.)(\|o|o\||\}o|o\{|\}\||\|\{|\|\||u(?=\s))\s*([^:]+?)\s*(?::(.*))?$"#)
+    private static let erWordCardinality =
+        #"one or zero|zero or one|zero or more|zero or many|many\(0\)|0\+|one or more|one or many|many\(1\)|1\+|only one|1|u"#
+    private static let erWordRelation = try? NSRegularExpression(pattern:
+        #"^(.+?)\s+("# + erWordCardinality + #")\s+(optionally to|to)\s+("# + erWordCardinality + #")\s+([^:]+?)\s*(?::(.*))?$"#)
+
+    /// Reads one relationship statement in symbol or word form.
+    private static func erRelation(_ line: String) -> ERRelationSyntax? {
+        func cardinality(_ token: String) -> ERDiagram.Cardinality? {
+            switch token {
+            case "||", "only one", "1", "u": return .one
+            case "|o", "o|", "one or zero", "zero or one": return .zeroOrOne
+            case "}|", "|{", "one or more", "one or many", "many(1)", "1+": return .oneOrMore
+            case "}o", "o{", "zero or more", "zero or many", "many(0)", "0+": return .zeroOrMore
+            default: return nil
+            }
+        }
+        let range = NSRange(line.startIndex..., in: line)
+        for (regex, isWord) in [(erSymbolRelation, false), (erWordRelation, true)] {
+            guard let regex, let match = regex.firstMatch(in: line, range: range) else { continue }
+            func group(_ i: Int) -> String? {
+                Range(match.range(at: i), in: line).map { String(line[$0]) }
+            }
+            guard let from = group(1), let left = group(2), let link = group(3),
+                  let right = group(4), let to = group(5),
+                  let fromCard = cardinality(left), let toCard = cardinality(right) else { continue }
+            let label = group(6).map {
+                $0.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            }
+            let identifying = isWord ? link == "to" : link == "--"
+            return ERRelationSyntax(from: from, to: to, fromCard: fromCard, toCard: toCard,
+                                    identifying: identifying, label: label,
+                                    parentMarker: left == "u" || right == "u")
+        }
+        return nil
     }
 
     // MARK: Sequence
