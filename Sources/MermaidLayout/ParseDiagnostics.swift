@@ -158,9 +158,7 @@ extension MermaidParser {
         let headerWord = String(header.split(separator: " ").first ?? "")
 
         let (parsed, reports) = ParseReport.collecting { parse(source) }
-        if parsed != nil {
-            return setAsideNotes(source) + resolve(reports.filter { $0.severity == .note }, in: source)
-        }
+        if parsed != nil { return parseNotes(source, reports: reports) }
         let rejections = resolve(reports.filter { $0.severity == .error }, in: source)
         if !rejections.isEmpty { return rejections }
 
@@ -191,6 +189,24 @@ extension MermaidParser {
         }
         return [.init(severity: .error, line: headerLine,
                       message: "unknown diagram type '\(headerWord)'", code: .unknownDiagramType)]
+    }
+
+    /// Parses `source` once and returns the diagram with the same
+    /// diagnostics ``diagnose(_:)`` gives: the `.note`s for a source that
+    /// parses (content left out, clamped, or accepted leniently), or the
+    /// `.error`s explaining why it doesn't. Cheaper than calling
+    /// ``parseWithMetadata(_:)`` and ``diagnose(_:)`` separately on success.
+    public static func parseWithDiagnostics(_ source: String)
+        -> (result: (diagram: MermaidDiagram, metadata: DiagramMetadata)?, diagnostics: [ParseDiagnostic]) {
+        let (parsed, reports) = ParseReport.collecting { parseWithMetadata(source) }
+        guard let parsed else { return (nil, diagnose(source)) }
+        return (parsed, parseNotes(normalizedLineEndings(source), reports: reports))
+    }
+
+    /// The notes for a source that parsed: flowchart statements set aside
+    /// plus every parser-reported note.
+    private static func parseNotes(_ source: String, reports: [ParseReport.Entry]) -> [ParseDiagnostic] {
+        setAsideNotes(source) + resolve(reports.filter { $0.severity == .note }, in: source)
     }
 
     /// Maps parser reports to diagnostics, resolving each report's line text

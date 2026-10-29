@@ -22,14 +22,23 @@ enum DiagramRenderer {
     // and uncached (see `renderImage`); a host batching many diagrams there
     // should cache the returned PlatformImage itself.
     #if canImport(AppKit) || canImport(UIKit)
-    private final class Entry {
+    final class Entry {
         let image: PlatformImage
         /// VoiceOver description, attached to the image so accessibility
         /// survives the cache round-trip.
         let altText: String?
-        init(image: PlatformImage, altText: String?) {
+        /// Parse notes for the source (content left out, clamped, or accepted
+        /// leniently); empty when the diagram is expected to be complete.
+        let diagnostics: [ParseDiagnostic]
+        /// Pixels per point of the bitmap, or nil when the image draws
+        /// lazily at the destination's scale (AppKit's handler-backed image).
+        let rasterScale: CGFloat?
+        init(image: PlatformImage, altText: String?, diagnostics: [ParseDiagnostic] = [],
+             rasterScale: CGFloat? = nil) {
             self.image = image
             self.altText = altText
+            self.diagnostics = diagnostics
+            self.rasterScale = rasterScale
         }
     }
 
@@ -256,16 +265,32 @@ enum DiagramRenderer {
 
     /// Canvas geometry shared by all backends: layout size unioned with
     /// marker-inflated edge routes, padded, with the translation that maps
-    /// content into it. Nil when the diagram is empty or implausibly large.
+    /// content into it. Nil when the diagram is empty or larger than the
+    /// default ``MermaidRasterLimits/maxDimension``.
     static func paddedCanvas(
         size: CGSize, edgePolylines: [[CGPoint]]
     ) -> (canvasSize: CGSize, originX: CGFloat, originY: CGFloat)? {
-        guard size.width > 0, size.height > 0, size.width < 4000, size.height < 4000 else { return nil }
+        try? checkedCanvas(size: size, edgePolylines: edgePolylines, maxDimension: MermaidRasterLimits.default.maxDimension).get()
+    }
+
+    /// ``paddedCanvas(size:edgePolylines:)`` with the reason it failed: an
+    /// empty or non-finite layout, or one with a side of `maxDimension` points
+    /// or more (reported with the measured size).
+    static func checkedCanvas(
+        size: CGSize, edgePolylines: [[CGPoint]], maxDimension: CGFloat
+    ) -> Result<(canvasSize: CGSize, originX: CGFloat, originY: CGFloat), MermaidRenderError> {
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
+            return .failure(.emptyDiagram)
+        }
         let bounds = contentBounds(size: size, edges: edgePolylines)
-        guard bounds.width < 4000, bounds.height < 4000 else { return nil }
+        guard bounds.width.isFinite, bounds.height.isFinite else { return .failure(.emptyDiagram) }
         let pad: CGFloat = 6
-        return (CGSize(width: bounds.width + pad * 2, height: bounds.height + pad * 2),
-                pad - bounds.minX, pad - bounds.minY)
+        let canvasSize = CGSize(width: bounds.width + pad * 2, height: bounds.height + pad * 2)
+        guard canvasSize.width < maxDimension, canvasSize.height < maxDimension else {
+            return .failure(.tooLarge(width: Double(canvasSize.width), height: Double(canvasSize.height),
+                                      reason: .dimension(limit: Double(maxDimension))))
+        }
+        return .success((canvasSize, pad - bounds.minX, pad - bounds.minY))
     }
 
     /// Wraps a render plan in a caption band when the source carries a
@@ -335,7 +360,11 @@ enum DiagramRenderer {
         let (size, edgePolylines, draw) = captionedPlan(
             renderPlan(for: diagram, theme: theme, spacing: spacing),
             caption: title, diagram: diagram, theme: theme, textScale: spacing.textScale)
-        guard let (canvasSize, originX, originY) = paddedCanvas(size: size, edgePolylines: edgePolylines) else { return nil }
+        let limits = MermaidRasterLimits.default
+        guard let (canvasSize, originX, originY) = try? checkedCanvas(
+                  size: size, edgePolylines: edgePolylines, maxDimension: limits.maxDimension).get(),
+              limits.rasterScale(for: canvasSize, preferred: 1) == 1
+        else { return nil }
         // The bitmap surface is whole pixels (ceil), so canvasSize is fractional
         // slightly smaller than the surface. Fill the FULL pixel rect, not
         // canvasSize, or a <1px transparent strip is left along the right/bottom
@@ -363,24 +392,98 @@ enum DiagramRenderer {
     /// pipeline used for a Mermaid source. The DOT/terminal render path.
     static func image(for diagram: MermaidDiagram, title: String?,
                       theme: DiagramTheme, spacing: DiagramSpacing = .regular) -> PlatformImage? {
+        guard let image = try? rasterize(diagram: diagram, title: title, theme: theme, spacing: spacing,
+                                         limits: .default).get().image else { return nil }
+        #if os(macOS)
+        image.accessibilityDescription = MermaidAltText.describe(diagram)
+        #endif
+        return image
+    }
+
+    /// Lays out and rasterizes `diagram` within `limits`.
+    ///
+    /// The bitmap's scale is the platform's preferred one (the screen scale on
+    /// UIKit; AppKit draws lazily at the destination's scale, assumed 2x) unless
+    /// that bitmap would exceed `limits.maxBytes`; then the scale drops until it
+    /// fits, down to `limits.minimumScale`. Below that, or when a side reaches
+    /// `limits.maxDimension` points, the result is `.tooLarge` with the
+    /// measured size — never a silent nil.
+    static func rasterize(diagram: MermaidDiagram, title: String?, theme: DiagramTheme,
+                          spacing: DiagramSpacing, limits: MermaidRasterLimits)
+        -> Result<(image: PlatformImage, scale: CGFloat?), MermaidRenderError> {
         let (size, edgePolylines, draw) = captionedPlan(
             renderPlan(for: diagram, theme: theme, spacing: spacing),
             caption: title, diagram: diagram, theme: theme, textScale: spacing.textScale)
-        guard let (canvasSize, originX, originY) = paddedCanvas(size: size, edgePolylines: edgePolylines) else { return nil }
-        #if os(macOS)
-        let appearance = NSAppearance(named: theme.prefersDark ? .darkAqua : .aqua)
-        let image = NSImage(size: canvasSize, flipped: true) { _ in
-            guard let context = NSGraphicsContext.current?.cgContext else { return false }
-            context.translateBy(x: originX, y: originY)
-            let render = { draw(context) }
-            if let appearance { appearance.performAsCurrentDrawingAppearance(render) } else { render() }
-            return true
+        let canvas: (canvasSize: CGSize, originX: CGFloat, originY: CGFloat)
+        switch checkedCanvas(size: size, edgePolylines: edgePolylines, maxDimension: limits.maxDimension) {
+        case .success(let value): canvas = value
+        case .failure(let error): return .failure(error)
         }
-        image.accessibilityDescription = MermaidAltText.describe(diagram)
+        let (canvasSize, originX, originY) = canvas
+
+        #if os(macOS)
+        let preferredScale: CGFloat = 2
         #else
         let traits = UITraitCollection(userInterfaceStyle: theme.prefersDark ? .dark : .light)
+        // `preferred()` snapshots UITraitCollection.current, so resolve it
+        // under the pinned traits (the format type has no trait property).
         var format = UIGraphicsImageRendererFormat.preferred()
         traits.performAsCurrent { format = .preferred() }
+        let preferredScale = format.scale
+        #endif
+        guard let scale = limits.rasterScale(for: canvasSize, preferred: preferredScale) else {
+            return .failure(.tooLarge(width: Double(canvasSize.width), height: Double(canvasSize.height),
+                                      reason: .memory(limitBytes: limits.maxBytes)))
+        }
+
+        #if os(macOS)
+        let appearance = NSAppearance(named: theme.prefersDark ? .darkAqua : .aqua)
+        if scale >= preferredScale {
+            // Within budget at 2x: keep the lazily drawn, resolution-independent
+            // image (drawn at whatever scale the destination needs).
+            let image = NSImage(size: canvasSize, flipped: true) { _ in
+                guard let context = NSGraphicsContext.current?.cgContext else { return false }
+                context.translateBy(x: originX, y: originY)
+                let render = { draw(context) }
+                if let appearance { appearance.performAsCurrentDrawingAppearance(render) } else { render() }
+                return true
+            }
+            return .success((image, nil))
+        }
+        // Over budget at 2x: draw once into a bitmap at the reduced scale, so
+        // the memory cost is bounded no matter where the host draws it.
+        let pixelWidth = Int((canvasSize.width * scale).rounded(.up))
+        let pixelHeight = Int((canvasSize.height * scale).rounded(.up))
+        guard let context = CGContext(
+            data: nil, width: pixelWidth, height: pixelHeight, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else {
+            return .failure(.tooLarge(width: Double(canvasSize.width), height: Double(canvasSize.height),
+                                      reason: .memory(limitBytes: limits.maxBytes)))
+        }
+        // The draw code assumes a flipped, top-left-origin CTM (as the PDF
+        // path does), so flip the y-up bitmap context first.
+        context.translateBy(x: 0, y: CGFloat(pixelHeight))
+        context.scaleBy(x: scale, y: -scale)
+        context.translateBy(x: originX, y: originY)
+        let graphics = NSGraphicsContext(cgContext: context, flipped: true)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = graphics
+        if let appearance { appearance.performAsCurrentDrawingAppearance { draw(context) } } else { draw(context) }
+        NSGraphicsContext.restoreGraphicsState()
+        guard let cgImage = context.makeImage() else {
+            return .failure(.tooLarge(width: Double(canvasSize.width), height: Double(canvasSize.height),
+                                      reason: .memory(limitBytes: limits.maxBytes)))
+        }
+        return .success((NSImage(cgImage: cgImage, size: canvasSize), scale))
+        #else
+        // Pin trait resolution to the theme's appearance: without this,
+        // dynamic colors (tintColor, host semantic colors) rasterize under
+        // whatever UITraitCollection.current happens to be — wrong under
+        // an explicit opposite-appearance theme, and unspecified on the
+        // async path's detached thread.
+        format.scale = scale
         let renderer = UIGraphicsImageRenderer(size: canvasSize, format: format)
         let image = renderer.image { rendererContext in
             traits.performAsCurrent {
@@ -388,72 +491,58 @@ enum DiagramRenderer {
                 draw(rendererContext.cgContext)
             }
         }
+        return .success((image, scale))
         #endif
-        return image
     }
 
     static func attachmentString(source: String, theme: DiagramTheme,
                                  spacing: DiagramSpacing = .regular) -> NSAttributedString? {
+        guard let entry = try? renderEntry(source: source, theme: theme, spacing: spacing,
+                                           limits: .default).get() else { return nil }
+        return attributedString(for: entry)
+    }
+
+    /// The cached render of a Mermaid `source`, or why there is none. Shared
+    /// by the attachment/image entry points and ``MermaidRenderer/render(source:theme:spacing:limits:)``.
+    /// Failures are not cached (they are cheap to recompute and a host may
+    /// retry with other limits).
+    static func renderEntry(source: String, theme: DiagramTheme, spacing: DiagramSpacing,
+                            limits: MermaidRasterLimits) -> Result<Entry, MermaidRenderError> {
         // Cache first: a hit must not pay a re-parse of up-to-50KB source
         // (MermaidView evaluates this on every SwiftUI body pass).
-        let key = RenderKey(source: source, theme: theme.fingerprint, spacing: spacing.fingerprint)
+        let spacingKey = limits == .default ? spacing.fingerprint : "\(spacing.fingerprint)|\(limits.fingerprint)"
+        let key = RenderKey(source: source, theme: theme.fingerprint, spacing: spacingKey)
         if let cached = cache.object(forKey: key) {
-            return attributedString(for: cached)
+            return .success(cached)
         }
-        guard let (diagram, metadata) = MermaidParser.parseWithMetadata(source) else { return nil }
-
-        let entry: Entry
-        do {
-            let (size, edgePolylines, draw) = captionedPlan(
-                renderPlan(for: diagram, theme: theme, spacing: spacing),
-                caption: metadata.title, diagram: diagram, theme: theme, textScale: spacing.textScale)
-            guard let (canvasSize, originX, originY) = paddedCanvas(size: size, edgePolylines: edgePolylines) else { return nil }
-
-            #if os(macOS)
-            let appearance = NSAppearance(named: theme.prefersDark ? .darkAqua : .aqua)
-            let image = NSImage(size: canvasSize, flipped: true) { _ in
-                guard let context = NSGraphicsContext.current?.cgContext else { return false }
-                context.translateBy(x: originX, y: originY)
-                let render = { draw(context) }
-                if let appearance {
-                    appearance.performAsCurrentDrawingAppearance(render)
-                } else {
-                    render()
-                }
-                return true
-            }
-            #else
-            // Pin trait resolution to the theme's appearance: without this,
-            // dynamic colors (tintColor, host semantic colors) rasterize under
-            // whatever UITraitCollection.current happens to be — wrong under
-            // an explicit opposite-appearance theme, and unspecified on the
-            // async path's detached thread.
-            let traits = UITraitCollection(userInterfaceStyle: theme.prefersDark ? .dark : .light)
-            // `preferred()` snapshots UITraitCollection.current, so resolve it
-            // under the pinned traits (the format type has no trait property).
-            var format = UIGraphicsImageRendererFormat.preferred()
-            traits.performAsCurrent { format = .preferred() }
-            let renderer = UIGraphicsImageRenderer(size: canvasSize, format: format)
-            let image = renderer.image { rendererContext in
-                traits.performAsCurrent {
-                    rendererContext.cgContext.translateBy(x: originX, y: originY)
-                    draw(rendererContext.cgContext)
-                }
-            }
-            #endif
-            entry = Entry(image: image, altText: MermaidAltText.describe(diagram))
-            // Cost = actual backing bytes, not point-size bytes: UIKit
-            // rasterizes at screen scale; AppKit's handler-backed NSImage caches
-            // a rep per destination scale (2x assumed) on first draw.
-            #if os(macOS)
-            let scale: CGFloat = 2
-            #else
-            let scale = image.scale
-            #endif
-            let pixels = Int(image.size.width * scale * image.size.height * scale)
-            cache.setObject(entry, forKey: key, cost: pixels * 4)
+        let parsed = MermaidParser.parseWithDiagnostics(source)
+        guard let (diagram, metadata) = parsed.result else {
+            return .failure(.unparseable(parsed.diagnostics))
         }
-        return attributedString(for: entry)
+
+        let image: PlatformImage
+        let scale: CGFloat?
+        switch rasterize(diagram: diagram, title: metadata.title, theme: theme, spacing: spacing, limits: limits) {
+        case .success(let value): (image, scale) = value
+        case .failure(let error): return .failure(error)
+        }
+        let entry = Entry(image: image, altText: MermaidAltText.describe(diagram),
+                          diagnostics: parsed.diagnostics, rasterScale: scale)
+        cache.setObject(entry, forKey: key, cost: cacheCost(image, scale: scale))
+        return .success(entry)
+    }
+
+    /// Cost = actual backing bytes, not point-size bytes: UIKit rasterizes at
+    /// the chosen scale; AppKit's handler-backed NSImage caches a rep per
+    /// destination scale (2x assumed) on first draw.
+    private static func cacheCost(_ image: PlatformImage, scale: CGFloat?) -> Int {
+        #if os(macOS)
+        let scale = scale ?? 2
+        #else
+        let scale = scale ?? image.scale
+        #endif
+        let pixels = image.size.width * scale * image.size.height * scale
+        return Int(min(pixels * 4, CGFloat(Int.max / 2)))
     }
 
     /// Wraps a cached render as a fresh single-attachment string. On AppKit
@@ -515,13 +604,7 @@ enum DiagramRenderer {
         guard let diagram = parse(),
               let image = image(for: diagram, title: nil, theme: theme, spacing: spacing) else { return nil }
         let entry = Entry(image: image, altText: MermaidAltText.describe(diagram))
-        #if os(macOS)
-        let scale: CGFloat = 2
-        #else
-        let scale = image.scale
-        #endif
-        let pixels = Int(image.size.width * scale * image.size.height * scale)
-        cache.setObject(entry, forKey: key, cost: pixels * 4)
+        cache.setObject(entry, forKey: key, cost: cacheCost(image, scale: nil))
         return attributedString(for: entry)
     }
     #endif
