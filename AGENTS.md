@@ -19,7 +19,8 @@ This repository is the AI Markdown fork of [2389-research/MermaidKit](https://gi
 
 - Preserve upstream licenses, copyright notices, and meaningful source data, including multilingual fixtures.
 - Keep the `LinuxRaster` trait off by default so Apple consumers never resolve the Silica/Cairo branch dependencies.
-- Known maintenance items: the `autonumber` integer overflow crash, silent failure for canvases of 4000 pt or more, `\r\n` input, and missing diagnostics for diagrams that render with dropped content. Report unsupported diagram types explicitly instead of silently narrowing scope.
+- Untrusted input must never trap or fail silently: numbers from source use checked or saturating arithmetic, raster failures surface as `MermaidRenderError` (`MermaidRenderer.render`), and content that is dropped, clamped, or accepted although mermaid.js 11.17.2 rejects it is reported as a `ParseDiagnostic` note with a `code` (parsers report through `ParseReport`). Add a regression test and a mermaid.js comparison for each such case.
+- Report unsupported diagram types (currently railroad and info; eventmodeling sources written in mermaid.js 11.17.2 syntax do not parse) and known layout gaps explicitly instead of silently narrowing scope.
 - Write all new or modified development text in English, including documentation, code comments, diagnostics, log messages, test descriptions, and commit messages.
 - Keep the package buildable with Swift 6 language mode for iOS 26 and macOS 26 consumers, and keep ordinary builds independent of the AI Markdown workspace or external generators.
 - Keep upstream tests and add regression tests for each fix. Run checks appropriate to each change, and do not present historical results as new validation.
