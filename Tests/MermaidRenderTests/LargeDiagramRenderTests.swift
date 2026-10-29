@@ -62,7 +62,10 @@ final class LargeDiagramRenderTests: XCTestCase {
         let scale = try XCTUnwrap(result.rasterScale)
         XCTAssertLessThan(scale, 1.1)
         XCTAssertGreaterThan(scale, 0.9)
-        XCTAssertEqual(result.image.size, size)
+        // UIKit rounds a fractional-scale bitmap to whole pixels, so the
+        // point size may drift by under one pixel.
+        XCTAssertEqual(result.image.size.width, size.width, accuracy: 1 / scale)
+        XCTAssertEqual(result.image.size.height, size.height, accuracy: 1 / scale)
         let pixels = try XCTUnwrap(cgImage(result.image))
         XCTAssertLessThanOrEqual(pixels.width * pixels.height * 4, squeezed.maxBytes + 4 * (pixels.width + pixels.height + 1))
 
