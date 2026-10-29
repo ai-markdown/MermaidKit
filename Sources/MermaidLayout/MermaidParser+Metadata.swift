@@ -57,6 +57,7 @@ extension MermaidParser {
     static func strippingMetadata(from source: String)
         -> (lines: [(text: Substring, line: Int)], metadata: DiagramMetadata) {
         var metadata = DiagramMetadata()
+        let source = normalizedLineEndings(source)
         var lines = source.split(separator: "\n", omittingEmptySubsequences: false)
         var numbers = Array(1...lines.count)
 
