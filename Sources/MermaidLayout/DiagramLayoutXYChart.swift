@@ -118,6 +118,6 @@ extension DiagramLayoutEngine {
     /// em-dash for a non-finite value.
     static func formatAxisValue(_ value: Double) -> String {
         guard value.isFinite else { return "\u{2014}" }
-        return value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)
+        return value == value.rounded() && abs(value) < 1e15 ? String(Int(value)) : String(format: abs(value) < 1e15 ? "%.1f" : "%.3g", value)
     }
 }

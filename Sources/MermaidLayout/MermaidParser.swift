@@ -1908,6 +1908,28 @@ public enum MermaidParser {
 
     // MARK: Sequence
 
+    /// One `autonumber` operand: a non-negative decimal number (mermaid's
+    /// `NUM`). mermaid.js treats 0 as "unset" (it falls back to 1), keeps
+    /// growing past 2^63 as a float, and rejects signs and words. Returns nil
+    /// for text mermaid rejects; saturates out-of-range values at `Int.max`
+    /// and truncates fractions (each with a note) instead of trapping.
+    static func autonumberValue(_ text: String, line: String) -> Int? {
+        let isDigit: (Character) -> Bool = { $0.isASCII && $0.isNumber }
+        let digits = text.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let whole = digits.first, !whole.isEmpty, whole.allSatisfy(isDigit),
+              digits.count == 1 || (digits[1].allSatisfy(isDigit) && !digits[1].isEmpty)
+        else { return nil }
+        if digits.count == 2, digits[1].contains(where: { $0 != "0" }) {
+            ParseReport.note(.unsupportedFeature,
+                             "fractional autonumber '\(text)' is numbered with whole numbers", line: line)
+        }
+        guard let value = Int(whole) else {
+            ParseReport.note(.valueClamped, "autonumber '\(text)' exceeds \(Int.max) and was clamped", line: line)
+            return Int.max
+        }
+        return value == 0 ? 1 : value
+    }
+
     static func parseSequence(body: [String]) -> SequenceDiagram? {
         var participants: [String: SequenceDiagram.Participant] = [:]
         var order: [String] = []
@@ -1930,18 +1952,27 @@ public enum MermaidParser {
             }
         }
 
-        var autonumber = 0   // 0 = off; >0 = next number to stamp
+        var autonumber: Int?   // nil = off; otherwise the next number to stamp
         var autonumberStep = 1
+        var autonumberSaturated = false
         for line in body {
             if line == "autonumber" || line.hasPrefix("autonumber ") {
                 // `autonumber` / `autonumber 10` / `autonumber 10 5` /
-                // `autonumber off`.
+                // `autonumber off`. Values come from untrusted text: parse
+                // them without trapping (see `autonumberValue`).
                 let parts = line.split(separator: " ").dropFirst().map(String.init)
-                if parts.first == "off" { autonumber = 0 }
+                if parts.first == "off", parts.count == 1 { autonumber = nil; continue }
+                guard parts.count <= 2,
+                      let start = parts.isEmpty ? 1 : autonumberValue(parts[0], line: line),
+                      let step = parts.count < 2 ? 1 : autonumberValue(parts[1], line: line)
                 else {
-                    autonumber = parts.first.flatMap(Int.init) ?? 1
-                    autonumberStep = parts.count > 1 ? (Int(parts[1]) ?? 1) : 1
+                    ParseReport.reject(.invalidSyntax,
+                                       "autonumber expects 'off' or up to two non-negative numbers: '\(line)'",
+                                       line: line)
+                    return nil
                 }
+                autonumber = start
+                autonumberStep = step
                 continue
             }
             if line.hasPrefix("participant") || line.hasPrefix("actor") {
@@ -2110,9 +2141,19 @@ public enum MermaidParser {
                 if from.hasSuffix("+") || from.hasSuffix("-") { from = String(from.dropLast()).trimmingCharacters(in: .whitespaces) }
                 guard !from.isEmpty, !to.isEmpty else { break }
                 var number: Int?
-                if autonumber > 0 {
-                    number = autonumber
-                    autonumber += autonumberStep
+                if let next = autonumber {
+                    number = next
+                    // Saturate instead of trapping: `autonumber
+                    // 9223372036854775807` once crashed the host process on
+                    // the second message.
+                    let (sum, overflow) = next.addingReportingOverflow(autonumberStep)
+                    if overflow, !autonumberSaturated {
+                        autonumberSaturated = true
+                        ParseReport.note(.valueClamped,
+                                         "autonumber passed \(Int.max); later messages repeat that number",
+                                         line: line)
+                    }
+                    autonumber = overflow ? Int.max : sum
                 }
                 note(from)
                 note(to)

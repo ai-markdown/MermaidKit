@@ -55,7 +55,7 @@ extension DiagramRenderer {
     }
 
     private static func formatTreemapValue(_ value: Double) -> String {
-        value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)
+        value == value.rounded() && abs(value) < 1e15 ? String(Int(value)) : String(format: abs(value) < 1e15 ? "%.1f" : "%.3g", value)
     }
 }
 #endif
