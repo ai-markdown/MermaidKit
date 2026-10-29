@@ -23,9 +23,13 @@ extension DiagramRenderer {
             context.setFillColor(resolvedCGColor(theme.categoricalColor(band.colorIndex).withAlphaComponent(0.10)))
             context.fill(band.frame)
             context.restoreGState()
+            // The section name, left-aligned in the section-name column.
+            for line in band.labelLines {
+                drawText(line.text, center: line.center, size: labelSize, color: theme.ink, in: context)
+            }
         }
 
-        // Day grid: hairline verticals with a small index label at the base.
+        // Time grid: hairline verticals with a small date label at the base.
         for tick in layout.ticks {
             context.saveGState()
             context.setStrokeColor(resolvedCGColor(theme.hairline))
@@ -40,11 +44,11 @@ extension DiagramRenderer {
         }
 
         for bar in layout.bars {
-            // Task label, right-aligned into the gutter.
-            let measured = measure(bar.label, size: labelSize)
-            drawText(bar.label,
-                     center: CGPoint(x: bar.labelPoint.x - measured.width / 2, y: bar.labelPoint.y),
-                     size: labelSize, color: theme.secondaryTextColor, in: context)
+            // Task label, right-aligned into the gutter (wrapped lines).
+            for line in bar.labelLines {
+                drawText(line.text, center: line.center, size: labelSize,
+                         color: theme.secondaryTextColor, in: context)
+            }
 
             let fill = ganttFill(bar.status, theme: theme)
             context.saveGState()

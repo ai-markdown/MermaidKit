@@ -244,8 +244,9 @@ public struct PieLayout: Sendable {
     public let legendOrigin: CGPoint
 }
 
-/// Placed Gantt chart: a task-label gutter on the left, section tint bands,
-/// day-tick gridlines, and one bar (or milestone diamond) per task row.
+/// Placed Gantt chart: a section-name column and a task-label gutter on the
+/// left, section tint bands, dated tick gridlines, and one bar (or milestone
+/// diamond) per task row.
 /// Top-left-origin points; `size` is the canvas.
 public struct GanttLayout: Sendable {
     /// One task's bar row.
@@ -258,6 +259,15 @@ public struct GanttLayout: Sendable {
         public let labelPoint: CGPoint
         public let isMilestone: Bool
         public let status: GanttChart.Status
+        /// The task label broken into lines that fit the gutter, each with
+        /// its center (right-aligned to `labelPoint.x`).
+        public let labelLines: [TextLine]
+    }
+
+    /// One placed line of text: draw `text` centered on `center`.
+    public struct TextLine: Sendable {
+        public let text: String
+        public let center: CGPoint
     }
 
     /// Tint band behind one section's rows.
@@ -267,19 +277,25 @@ public struct GanttLayout: Sendable {
         public let frame: CGRect
         /// Cycled palette slot (section order), not a color.
         public let colorIndex: Int
+        /// The section name, wrapped to the section-name column at the band's
+        /// left edge and vertically centered in the band.
+        public let labelLines: [TextLine]
     }
 
-    /// A vertical day gridline spanning `top`…`bottom` at `x`.
+    /// A vertical gridline spanning `top`…`bottom` at `x`.
     public struct Tick: Sendable {
         public let x: CGFloat
-        public let label: String   // day index
+        /// The tick's date in the chart's `axisFormat`, or a day offset when
+        /// the chart has no absolute dates.
+        public let label: String
         public let top: CGFloat
         public let bottom: CGFloat
     }
 
     public let size: CGSize
     public let title: String?
-    /// X where the bar area begins (right of the task-label gutter).
+    /// X where the bar area begins (right of the section-name column and
+    /// the task-label gutter).
     public let labelGutter: CGFloat
     public let bars: [Bar]
     public let sections: [SectionBand]

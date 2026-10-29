@@ -419,9 +419,11 @@ public struct PieChart: Hashable, Sendable {
 /// are resolved to a numeric **day timeline** at parse time — from an explicit
 /// `dateFormat` date, an `after <id>` dependency, or an implicit "starts when
 /// the previous task ends" — so the layout engine only maps days to pixels.
-/// The earliest task sits at day 0. Directives that don't affect bar geometry
-/// (`axisFormat`, `excludes`, `todayMarker`) are accepted and ignored; only
-/// the ISO `YYYY-MM-DD` date format is understood.
+/// The earliest task sits at day 0; `originJulianDay` keeps the absolute
+/// date of day 0 when the chart has dates, so the axis can show calendar
+/// dates in `axisFormat`. `excludes` / `includes` / `weekend` already shaped
+/// the task lengths at parse time. Dates follow the chart's dayjs-style
+/// `dateFormat` (default `YYYY-MM-DD`).
 public struct GanttChart: Hashable, Sendable {
     /// Highlight tag from the task spec (`active`, `done`, `crit`).
     public enum Status: String, Hashable, Sendable {
@@ -458,11 +460,33 @@ public struct GanttChart: Hashable, Sendable {
         public var end: Double { start + length }
     }
 
+    /// An explicit axis tick interval (`tickInterval 1week`).
+    public struct TickInterval: Hashable, Sendable {
+        public enum Unit: String, Hashable, Sendable { case hour, day, week, month }
+        public var count: Int
+        public var unit: Unit
+        public init(count: Int, unit: Unit) {
+            self.count = count
+            self.unit = unit
+        }
+    }
+
     public var title: String?
     /// Tasks in declaration order.
     public var tasks: [Task]
     /// Section names in first-appearance order.
     public var sections: [String]
+    /// Julian Day Number (plus the time of day as a fraction) of day 0, or nil
+    /// when no task has an absolute date (only durations / dependencies), in
+    /// which case the axis falls back to day offsets.
+    public var originJulianDay: Double? = nil
+    /// d3/strftime pattern for the axis tick labels (mermaid's default is
+    /// `%Y-%m-%d`).
+    public var axisFormat: String = "%Y-%m-%d"
+    /// Explicit tick spacing from `tickInterval`, or nil for automatic ticks.
+    public var tickInterval: TickInterval? = nil
+    /// First day of the week for weekly ticks (`weekday monday`), 0 = Sunday.
+    public var weekStart: Int = 0
 }
 
 /// A Mermaid `timeline`: an ordered list of time periods, each carrying a

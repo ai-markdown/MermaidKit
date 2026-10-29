@@ -14,7 +14,8 @@ extension DiagramScene {
     /// - A Gantt has no connectors between tasks, so `edges` is empty; the day
     ///   ticks are axis gridlines, not routed edges, so their vertical rules are
     ///   deliberately NOT lowered as edges (that would spuriously "occlude"
-    ///   every bar). Each tick's day-index caption is a free-standing axis label.
+    ///   every bar). Each tick's date caption is a free-standing axis label, and
+    ///   each section name is a free-standing label inside its band.
     static func from(_ layout: GanttLayout, measure: DiagramTextMeasurer) -> DiagramScene {
         var nodes: [Node] = []
 
@@ -28,13 +29,26 @@ extension DiagramScene {
             nodes.append(Node(id: bar.label, frame: bar.frame))
         }
 
-        // Day-axis tick captions: free-standing labels sitting under the chart.
-        let labels: [Label] = layout.ticks.map { tick in
+        // Axis tick captions: free-standing labels sitting under the chart.
+        var labels: [Label] = layout.ticks.map { tick in
             let w = measuredLabelSize(measure, tick.label).width
             return Label(
                 text: tick.label,
                 frame: CGRect(x: tick.x - w / 2, y: tick.bottom + 2, width: w, height: 14)
             )
+        }
+
+        // Section names: free-standing labels inside their band, left of the
+        // task-label gutter.
+        for section in layout.sections {
+            for line in section.labelLines {
+                let size = measure(line.text, DiagramLayoutEngine.labelFontSize)
+                labels.append(Label(
+                    text: line.text,
+                    frame: CGRect(x: line.center.x - size.width / 2, y: line.center.y - size.height / 2,
+                                  width: size.width, height: size.height)
+                ))
+            }
         }
 
         return DiagramScene(

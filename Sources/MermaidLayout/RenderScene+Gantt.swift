@@ -8,9 +8,10 @@ extension RenderScene {
     /// Lowers a `GanttLayout` into a fully-resolved `RenderScene` — the
     /// platform-free twin of `DiagramRenderer.draw(_ layout: GanttLayout, …)`
     /// (MermaidRender/DiagramRenderer+Gantt.swift). It emits, in the same
-    /// painter's order: an optional title, section tint bands, day-tick
-    /// gridlines with base index labels, then one right-aligned task label plus
-    /// a status-tinted bar (or milestone diamond) per row.
+    /// painter's order: an optional title, section tint bands with their
+    /// names, tick gridlines with date labels at the base, then one
+    /// right-aligned task label plus a status-tinted bar (or milestone
+    /// diamond) per row.
     ///
     /// All fills are flat colors, so nothing is approximated. The critical
     /// status uses a fixed sRGB systemRed (matching the Linux `PlatformColor`
@@ -32,9 +33,15 @@ extension RenderScene {
             elements.append(.shape(Shape(
                 path: .roundedRect(band.frame, radius: 0),
                 fill: theme.categoricalColor(band.colorIndex).withAlpha(0.10), stroke: nil)))
+            // The section name, left-aligned in the section-name column.
+            for line in band.labelLines {
+                elements.append(.text(Text(
+                    string: line.text, center: line.center,
+                    fontSize: labelSize, color: theme.ink)))
+            }
         }
 
-        // Day grid: hairline verticals with a small index label at the base.
+        // Time grid: hairline verticals with a small date label at the base.
         for tick in layout.ticks {
             elements.append(.polyline(Polyline(
                 points: [CGPoint(x: tick.x, y: tick.top), CGPoint(x: tick.x, y: tick.bottom)],
@@ -47,12 +54,10 @@ extension RenderScene {
         }
 
         for bar in layout.bars {
-            // Task label, right-aligned into the gutter.
-            if !bar.label.isEmpty {
-                let measured = measure(bar.label, Double(labelSize))
+            // Task label, right-aligned into the gutter (wrapped lines).
+            for line in bar.labelLines where !line.text.isEmpty {
                 elements.append(.text(Text(
-                    string: bar.label,
-                    center: CGPoint(x: bar.labelPoint.x - measured.width / 2, y: bar.labelPoint.y),
+                    string: line.text, center: line.center,
                     fontSize: labelSize, color: theme.secondaryText)))
             }
 
