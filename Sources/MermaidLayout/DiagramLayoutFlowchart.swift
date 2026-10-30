@@ -25,6 +25,10 @@ extension DiagramLayoutEngine {
     /// jog — below the port/track separations (20/10) it can never be one, so
     /// `straightenJogs` collapses it onto a straight run.
     static let flowchartMinJog: CGFloat = 8
+    /// The shortest straight run a bending route leaves or meets a node on:
+    /// an arrowhead and the shortest step, so no end reads as a hook
+    /// (`edge-end-hooked`).
+    static let flowchartEndRun: CGFloat = flowchartArrowheadLen + flowchartMinJog
     /// Minimum visible connector stub on each side of an edge label: a labeled
     /// edge reserves `labelExtent + 2*stub` along its straight run so the line
     /// always reads on both sides of the caption. Shared by BOTH routers — the
@@ -279,6 +283,16 @@ extension DiagramLayoutEngine {
         // `labelExtent + 2*stub` — we grow the gap up front rather than
         // place-and-hope. Only the boundary the edge actually spans grows.
         var layerGaps = [CGFloat](repeating: flowchartLayerGap, count: max(layerCount, 1))
+        // A captioned two-cycle's edges run side by side across their gap,
+        // and one may bend near its source to keep them uncrossed
+        // (`orderJogsInGaps`): its gap holds the caption past that bend too,
+        // an arrowhead further from the one at its end.
+        var captionedLinks: Set<[String]> = []
+        let decisions = Set(chart.nodes.filter { $0.shape == .diamond }.map(\.id))
+        for edge in chart.edges where !edge.invisible && !(edge.label ?? "").isEmpty && edge.from != edge.to
+            && edge.hasArrow && !edge.backArrow && !decisions.contains(edge.from) && !decisions.contains(edge.to) {
+            captionedLinks.insert([edge.from, edge.to])
+        }
         for edge in chart.edges where !edge.invisible {
             guard let text = edge.label, !text.isEmpty,
                   let lu = layerOf[edge.from], let lv = layerOf[edge.to],
@@ -288,24 +302,68 @@ extension DiagramLayoutEngine {
             let boundary = min(lu, lv)
             let headEat = edge.hasArrow ? flowchartArrowheadLen : 0
             let tailEat = edge.backArrow ? flowchartArrowheadLen : 0
+            let either = captionedLinks.contains([edge.from, edge.to]) && captionedLinks.contains([edge.to, edge.from])
+                ? flowchartArrowheadLen : 0
+            // One that bends stops an end run short of its arrowhead, not just
+            // the arrowhead, so it isn't a hook: its gap holds that too.
+            let bends = edge.hasArrow && abs((crossCenter[edge.from] ?? 0) - (crossCenter[edge.to] ?? 0)) > 0.5
+                ? flowchartEndRun - flowchartArrowheadLen : 0
             layerGaps[boundary] = max(
-                layerGaps[boundary], headEat + tailEat + along + 2 * edgeLabelStub)
+                layerGaps[boundary], headEat + tailEat + along + 2 * edgeLabelStub + either + bends)
+        }
+        // Captioned edges meeting one node across one gap run side by side
+        // off that face. Where their captions, stacked across the flow, are
+        // more than the face can hold, they sit one after another along their
+        // runs instead (the placer staggers them), and the gap holds them all,
+        // with a stub between and beyond, and the bend and arrowhead past them.
+        var faceCaptions: [String: [CGFloat]] = [:], faceBreadth: [String: CGFloat] = [:]
+        var faceGap: [String: Int] = [:]
+        for edge in chart.edges where !edge.invisible && edge.from != edge.to {
+            guard let text = edge.label, !text.isEmpty,
+                  let lu = layerOf[edge.from], let lv = layerOf[edge.to], abs(lu - lv) == 1 else { continue }
+            let sz = measure(text, labelFontSize)
+            let (along, across) = horizontal ? (sz.width + 6, sz.height + 2) : (sz.height + 2, sz.width + 6)
+            for node in [edge.from, edge.to] {
+                let key = "\(node)|\(min(lu, lv))"
+                faceCaptions[key, default: []].append(along)
+                faceBreadth[key, default: 0] += across + 2
+                faceGap[key] = min(lu, lv)
+            }
+        }
+        for (key, alongs) in faceCaptions where alongs.count > 1 {
+            let node = String(key[..<key.lastIndex(of: "|")!])
+            guard let gap = faceGap[key], let breadth = crossBreadth[node], faceBreadth[key]! > breadth else { continue }
+            let stub = DiagramLayoutLinter.minCaptionStub
+            layerGaps[gap] = max(layerGaps[gap], alongs.reduce(0, +) + CGFloat(alongs.count + 1) * stub
+                                 + flowchartEndRun + flowchartArrowheadLen)
         }
         // A self-loop's bars stand off the node's main-axis faces into the
         // neighbouring layer gaps; keep the gap's middle, where other edges
         // jog, clear of them, and every track a jog takes off that middle for
-        // its fan-in and fan-out (`routeChains`' jog bias, from the same
-        // `jogFanGroups`). A loop in the first or last layer stands off into
-        // the margin instead, which then grows to fit it.
+        // its fan-in and fan-out (`routeChains`' jog bias, `fanJogBias`, from
+        // the same `jogFanGroups`). A loop in the first or last layer stands
+        // off into the margin instead, which then grows to fit it.
         let fans = jogFanGroups(chart, chains: chains)
         var gapJogBias = [CGFloat](repeating: 0, count: max(layerCount, 1))
         for (target, idxs) in fans.into {
             for index in idxs {
                 let source = chains[index][0]
-                guard let lu = layerOf[source], let lv = layerOf[target] else { continue }
-                let spread = jogSpread(idxs.count) + jogSpread(fans.outOf[source]?.count ?? 1)
-                for gap in min(lu, lv)..<max(lu, lv) { gapJogBias[gap] = max(gapJogBias[gap], spread) }
+                guard let lu = layerOf[source], let lv = layerOf[target], lu != lv else { continue }
+                // The fan-out's tracks in the gap the edge leaves by, the
+                // fan-in's in the one it enters by.
+                let into = jogSpread(idxs.count), out = jogSpread(fans.outOf[source]?.count ?? 1)
+                let (first, last) = lu < lv ? (lu, lv - 1) : (lu - 1, lv)
+                for (gap, spread) in first == last ? [(first, out + into)] : [(first, out), (last, into)] {
+                    gapJogBias[gap] = max(gapJogBias[gap], spread)
+                }
             }
+        }
+        // Every one of those tracks fits in its gap, an end run clear of each
+        // face (#108): no jog bends under an arrowhead or against a node. A fan's tracks are spaced by its rank in cross
+        // order, which growing a gap leaves alone, so a gap wide enough here
+        // never clamps a jog onto a node's face, where fans would share it.
+        for gap in gapJogBias.indices where gap < layerGaps.count && gapJogBias[gap] > 0 {
+            layerGaps[gap] = max(layerGaps[gap], 2 * (gapJogBias[gap] + flowchartEndRun))
         }
         var leadPad: CGFloat = 0, tailPad: CGFloat = 0
         for loop in selfLoops.values {
@@ -408,7 +466,13 @@ extension DiagramLayoutEngine {
         var (placedEdges, crossLimit) = routeChains(
             chart: chart, chains: chains, frames: placement.frames,
             horizontal: horizontal, crossExtent: placement.crossExtent,
-            backEdges: backEdges, selfLoops: selfLoops
+            backEdges: backEdges, selfLoops: selfLoops,
+            gaps: zip(placement.bands, placement.bands.dropFirst()).map { ($0.end, $1.start) },
+            captionRuns: Dictionary(uniqueKeysWithValues: chart.edges.indices.compactMap { index in
+                guard let text = chart.edges[index].label, !text.isEmpty else { return nil }
+                let sz = measure(text, labelFontSize)
+                return (index, (horizontal ? sz.width + 6 : sz.height + 2) + 2 * DiagramLayoutLinter.minCaptionStub)
+            })
         )
         // An edge naming an unfolded subgraph ranks with one of its nodes,
         // and ends where it reaches the subgraph's box.
@@ -971,6 +1035,73 @@ extension DiagramLayoutEngine {
         return (into, outOf)
     }
 
+    /// How far each edge's jogs move off its layer gaps' middle, so the
+    /// edges of one fan (those leaving one node, or entering one) take
+    /// distinct tracks `flowchartJogTrack` apart and don't cross (#110). A
+    /// fan of n has n tracks centred on the gap's middle. Its edges on one
+    /// side of its hub take them from the one nearest the hub, in order of
+    /// how far out they reach, the farthest first, so each one's run along
+    /// the main axis stays clear of the others' jogs. The two sides share
+    /// the tracks, as their jogs span cross ranges either side of the hub,
+    /// and so do edges leaving the hub's two faces, which jog in different
+    /// gaps. Jogs stay off the gap's middle, leaving a captioned edge one
+    /// long run. Edges that reach as far, such as parallel edges, go in the
+    /// order of their ports on the hub, farthest out first, so an edge's
+    /// places in the fan it leaves (`out`) and the one it enters (`into`)
+    /// agree. An edge between adjacent layers jogs on the sum of the two in
+    /// one gap, which can reverse a fan's order there; `orderJogsInGaps`
+    /// puts that right (#112). `cross` and `main` give a chain node's centre
+    /// on each axis, and
+    /// `port` where an edge's end meets its node's face, if known.
+    static func fanJogBias(
+        _ chart: Flowchart, chains: [[String]],
+        cross: (String) -> CGFloat?, main: (String) -> CGFloat?,
+        port: (_ edge: Int, _ isSource: Bool) -> CGFloat? = { _, _ in nil }
+    ) -> (out: [CGFloat], into: [CGFloat]) {
+        struct Side: Hashable { var hub: String; var into: Bool; var forward: Bool; var side: Int }
+        var sides: [Side: [(index: Int, reach: CGFloat, outward: CGFloat)]] = [:]
+        let fans = jogFanGroups(chart, chains: chains)
+        for (into, groups) in [(false, fans.outOf), (true, fans.into)] {
+            for (hub, idxs) in groups {
+                for index in idxs {
+                    let chain = chains[index]
+                    let far = into ? chain[chain.count - 2] : chain[1]
+                    guard let hc = cross(hub), let fc = cross(far), let hm = main(hub), let fm = main(far),
+                          cross(chain[0]) != nil, cross(chain[chain.count - 1]) != nil else { continue }
+                    let reach = fc - hc
+                    let side = reach > 0.5 ? 1 : (reach < -0.5 ? -1 : 0)
+                    let outward = CGFloat(side == 0 ? 1 : side) * ((port(index, !into) ?? hc) - hc)
+                    sides[Side(hub: hub, into: into, forward: into ? hm > fm : fm > hm, side: side),
+                          default: []].append((index, abs(reach), outward))
+                }
+            }
+        }
+        // Edges through one face of the hub jog in one gap, and spread over
+        // as many tracks as there are of them.
+        var faceCount: [Side: Int] = [:]
+        for (key, members) in sides {
+            var face = key; face.side = 0
+            faceCount[face, default: 0] += members.count
+        }
+        var out = [CGFloat](repeating: 0, count: chart.edges.count), into = out
+        for (key, members) in sides {
+            var face = key; face.side = 0
+            let spread = jogSpread(faceCount[face] ?? 1)
+            let ordered = members.sorted {
+                $0.reach != $1.reach ? $0.reach > $1.reach
+                    : $0.outward != $1.outward ? $0.outward > $1.outward : $0.index < $1.index
+            }
+            // Toward the hub is up the main axis for a forward edge leaving
+            // it, down for one entering it, and the reverse for a back edge.
+            let toward: CGFloat = key.into == key.forward ? 1 : -1
+            for (rank, member) in ordered.enumerated() {
+                let track = toward * (spread - CGFloat(rank) * flowchartJogTrack)
+                if key.into { into[member.index] = track } else { out[member.index] = track }
+            }
+        }
+        return (out, into)
+    }
+
     /// How far a fan of `n` edges moves its outermost jog off a gap's middle.
     static func jogSpread(_ n: Int) -> CGFloat { CGFloat(max(n, 1) - 1) / 2 * flowchartJogTrack }
 
@@ -1064,7 +1195,9 @@ extension DiagramLayoutEngine {
         horizontal: Bool,
         crossExtent: CGFloat,
         backEdges: Set<Int> = [],
-        selfLoops: [Int: SelfLoopPath] = [:]
+        selfLoops: [Int: SelfLoopPath] = [:],
+        gaps: [(lo: CGFloat, hi: CGFloat)] = [],
+        captionRuns: [Int: CGFloat] = [:]
     ) -> (edges: [FlowchartLayout.PlacedEdge], crossLimit: CGFloat) {
         let shapeOf = Dictionary(uniqueKeysWithValues: chart.nodes.map { ($0.id, $0.shape) })
         var loopCount: [String: Int] = [:]
@@ -1345,37 +1478,14 @@ extension DiagramLayoutEngine {
             for (i, p) in sorted.enumerated() { portCross[portKey(p.edge, p.isSource)] = pos[i] }
         }
 
-        // Give each edge entering the same target a distinct jog track, ordered
-        // by its approach position, so their bend corners don't nest into one
-        // another (the "double corner" where two edges turn into one box).
-        var jogBias = [CGFloat](repeating: 0, count: chart.edges.count)
-        let fans = jogFanGroups(chart, chains: chains)
-        for idxs in fans.into.values.map({ $0.filter { geos[$0].valid } }) where idxs.count > 1 {
-            let ordered = idxs.sorted {
-                (horizontal ? geos[$0].lastPrev.y : geos[$0].lastPrev.x)
-                    < (horizontal ? geos[$1].lastPrev.y : geos[$1].lastPrev.x)
-            }
-            for (rank, idx) in ordered.enumerated() {
-                jogBias[idx] += CGFloat(rank) * flowchartJogTrack - jogSpread(ordered.count)
-            }
-        }
-
-        // Symmetric fan-OUT separation: edges LEAVING the same source spread
-        // their jog corners over distinct tracks the same way fan-IN edges do.
-        // Without this, two edges from one node to different next-layer targets
-        // put their cross-axis connector on the SAME midpoint channel, so the
-        // two runs overlap and render as a single doubled wire (`edges-doubled`).
-        // Ordered by the direction each edge heads (its `firstNext` cross), so
-        // the corners stack in approach order rather than nesting.
-        for idxs in fans.outOf.values.map({ $0.filter { geos[$0].valid } }) where idxs.count > 1 {
-            let ordered = idxs.sorted {
-                (horizontal ? geos[$0].firstNext.y : geos[$0].firstNext.x)
-                    < (horizontal ? geos[$1].firstNext.y : geos[$1].firstNext.x)
-            }
-            for (rank, idx) in ordered.enumerated() {
-                jogBias[idx] += CGFloat(rank) * flowchartJogTrack - jogSpread(ordered.count)
-            }
-        }
+        // Give the edges of each fan distinct jog tracks, so their bend
+        // corners neither nest into one another nor share a line
+        // (`edges-doubled`), and no two of them cross (`fanJogBias`).
+        let (jogOut, jogIn) = fanJogBias(
+            chart, chains: chains,
+            cross: { id in frames[id].map { horizontal ? $0.midY : $0.midX } },
+            main: { id in frames[id].map { horizontal ? $0.midX : $0.midY } },
+            port: { portCross[portKey($0, $1)] })
 
         // A self-loop's polyline: out of the exit face, round the node's
         // cross-far side at `reach`, back into the entry face. A decision has
@@ -1446,7 +1556,15 @@ extension DiagramLayoutEngine {
                 tail = [attach(g.chain[g.chain.count - 1], cross: cross, rightOrBottom: g.enterBottom, isSource: false)]
             }
 
-            routes[index] = routePolyline(head + g.dummyCenters + tail, horizontal: horizontal, jogBias: jogBias[index])
+            // A fan's tracks matter where it meets its hub: an edge jogs on
+            // its fan-out's track in the gap it leaves by, on its fan-in's in
+            // the gap it enters by, and mid-gap between its long-edge dummies.
+            let first = head.count - 1, last = first + g.dummyCenters.count
+            let (out, into) = (jogOut[index], jogIn[index])
+            routes[index] = routePolyline(head + g.dummyCenters + tail, horizontal: horizontal, jogBias: out + into,
+                                          stepBias: last == first ? nil : { step in
+                step == first ? out : step == last ? into : (first < step && step < last ? 0 : out + into)
+            })
         }
 
         // A labeled adjacent-layer edge whose route makes a single jog splits the
@@ -1454,22 +1572,26 @@ extension DiagramLayoutEngine {
         // rides the longer half, so even though the gap was reserved to host
         // `arrowheadLen + labelExtent + 2*stub`, HALF of it can leave under the
         // minimum stub (`label-crowds-edge`). Slide the lone bend toward the
-        // arrowhead end, leaving just the arrowhead's length past it, so the
-        // arrow-FREE half spans the whole reserved run and the caption breathes.
+        // arrowhead end, leaving an end run past it (an arrowhead and the
+        // shortest step, so it isn't a hook), so the arrow-free half spans
+        // nearly the whole reserved run and the caption breathes.
         // Only unlabeled-neutral shapes with a plain one-corner route qualify;
         // diamonds (vertex ports) and multi-corner/dummy routes are left alone.
+        var captionBends: [Int: (natural: CGFloat, source: CGFloat?)] = [:]
         for index in chart.edges.indices {
             let e = chart.edges[index]
             let g = geos[index]
             guard g.valid, g.dummyCenters.isEmpty, !g.srcDiamond, !g.dstDiamond,
-                  e.hasArrow, !e.backArrow, !backEdges.contains(index),
+                  e.hasArrow, !e.backArrow,
                   let text = e.label, !text.isEmpty else { continue }
             var pts = routes[index]
             guard pts.count == 4 else { continue }        // exactly one corner
             // A looped target's bars stand off its entry face, so there the
             // bend stops a jog track short of them instead.
-            let stop = max(flowchartArrowheadLen,
+            let stop = max(flowchartEndRun,
                            loopExcursion[g.chain[g.chain.count - 1]].map { $0 + flowchartJogTrack } ?? 0)
+            // Where the bend was, on its fan's track: it may go back there.
+            let natural = horizontal ? pts[1].x : pts[1].y
             if horizontal {
                 let x0 = pts[0].x, x3 = pts[3].x
                 guard abs(pts[1].y - pts[2].y) > 0.5,     // it really jogs
@@ -1484,7 +1606,19 @@ extension DiagramLayoutEngine {
                 pts[1].y = jy; pts[2].y = jy
             }
             routes[index] = pts
+            // It may as well stop as short of its source, where the caption
+            // still fits on the run past it, before the arrowhead.
+            let sourceStop = max(flowchartEndRun, loopExcursion[g.chain[0]].map { $0 + flowchartJogTrack } ?? 0)
+            let span = horizontal ? abs(pts[3].x - pts[0].x) : abs(pts[3].y - pts[0].y)
+            let fits = span - sourceStop - flowchartArrowheadLen >= (captionRuns[index] ?? .infinity) - 0.5
+            captionBends[index] = (natural, fits ? sourceStop : nil)
         }
+
+        // The jogs in each layer gap keep their tracks, but take them in the
+        // order that crosses least (#112).
+        orderJogsInGaps(&routes, gaps: gaps, horizontal: horizontal, captionBends: captionBends,
+                        captioned: Set(captionRuns.keys), track: flowchartJogTrack, near: flowchartMinJog,
+                        ignored: Set(chart.edges.indices.filter { chart.edges[$0].invisible || geos[$0].selfLoop != nil }))
 
         // Separate coincident main-axis runs: two different edges whose runs
         // share a track (an incoming edge's descent and a back edge's channel
@@ -1495,7 +1629,8 @@ extension DiagramLayoutEngine {
         let hidden = chart.edges.indices.filter { chart.edges[$0].invisible }
         var drawnRoutes = routes
         for index in hidden { drawnRoutes[index] = [] }
-        separateRuns(&drawnRoutes, horizontal: horizontal, minSep: flowchartPortSep)
+        separateRuns(&drawnRoutes, horizontal: horizontal, minSep: flowchartPortSep,
+                     obstacles: chart.nodes.compactMap { frames[$0.id] })
         for index in hidden { drawnRoutes[index] = routes[index] }
         routes = drawnRoutes
 
@@ -1504,7 +1639,9 @@ extension DiagramLayoutEngine {
         // cell before it resumes straight. Collapse that tiny jog so the run is
         // one straight stretch, never introducing a step where the ends could be
         // joined straight.
-        straightenJogs(&routes, horizontal: horizontal, maxJog: flowchartMinJog)
+        let decisions = chart.nodes.filter { $0.shape == .diamond }.compactMap { frames[$0.id] }
+        straightenJogs(&routes, horizontal: horizontal, maxJog: flowchartMinJog, endRun: flowchartEndRun,
+                       decisions: decisions)
 
         // A back edge that still threads UP THROUGH the node stack (a multi-bend
         // zigzag re-entering the occupied column, with its label crossing the
@@ -1538,7 +1675,8 @@ extension DiagramLayoutEngine {
         // Last, no two edges on one line: whatever still draws doubled moves
         // aside a track at a time, self-loops and nodes standing fast.
         separateDoubledRuns(&routes, fixed: Set(loops), ignored: Set(hidden),
-                            obstacles: chart.nodes.compactMap { frames[$0.id] }, track: flowchartJogTrack)
+                            obstacles: chart.nodes.compactMap { frames[$0.id] }, track: flowchartJogTrack,
+                            endRun: flowchartEndRun, decisions: decisions)
 
         var placedEdges: [FlowchartLayout.PlacedEdge] = []
         var crossLimit = flowchartMargin + crossExtent
@@ -1581,12 +1719,16 @@ extension DiagramLayoutEngine {
     /// gaps between layers, never across a node's row. `jogBias` shifts each jog
     /// off the gap midpoint (clamped to stay in the gap) so concurrent edges
     /// crossing the same gap can take distinct tracks and their bend corners
-    /// don't nest. Collinear runs are merged so straight edges stay two-point.
-    static func routePolyline(_ waypoints: [CGPoint], horizontal: Bool, jogBias: CGFloat = 0) -> [CGPoint] {
+    /// don't nest; `stepBias`, when given, sets it for each step between
+    /// waypoints instead. Collinear runs are merged so straight edges stay
+    /// two-point.
+    static func routePolyline(_ waypoints: [CGPoint], horizontal: Bool, jogBias: CGFloat = 0,
+                              stepBias: ((Int) -> CGFloat)? = nil) -> [CGPoint] {
         guard waypoints.count >= 2 else { return waypoints }
         var pts: [CGPoint] = [waypoints[0]]
         for i in 0..<(waypoints.count - 1) {
             let a = waypoints[i], b = waypoints[i + 1]
+            let jogBias = stepBias?(i) ?? jogBias
             if horizontal {
                 if abs(a.y - b.y) > 0.5 {
                     let jx = min(max((a.x + b.x) / 2 + jogBias, min(a.x, b.x)), max(a.x, b.x))
@@ -1611,8 +1753,22 @@ extension DiagramLayoutEngine {
     /// interior bends, so shifting its cross coordinate is absorbed by the
     /// connecting cross-axis segments without detaching an endpoint from a box.
     /// A few relaxation passes let a nudge that creates a fresh clash settle.
-    static func separateRuns(_ routes: inout [[CGPoint]], horizontal: Bool, minSep: CGFloat) {
+    /// A nudge never takes a route into one of `obstacles` (the nodes) it was
+    /// clear of: then the other run moves, if it can, or neither does.
+    static func separateRuns(_ routes: inout [[CGPoint]], horizontal: Bool, minSep: CGFloat,
+                             obstacles: [CGRect] = []) {
         let tol: CGFloat = 4
+        let inset = obstacles.map { $0.insetBy(dx: 1, dy: 1) }
+        // The obstacles the run at `i` of `pts` and its two neighbours cross.
+        func blocked(_ pts: [CGPoint], _ i: Int) -> Int {
+            var count = 0
+            for j in max(i - 1, 0)...min(i + 1, pts.count - 2) {
+                let a = pts[j], b = pts[j + 1]
+                let seg = CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
+                count += inset.filter { $0.intersects(seg) }.count
+            }
+            return count
+        }
         func cross(_ p: CGPoint) -> CGFloat { horizontal ? p.y : p.x }
         func main(_ p: CGPoint) -> CGFloat { horizontal ? p.x : p.y }
         // Is segment (a,b) a main-axis run? (constant cross, changing main.)
@@ -1636,16 +1792,20 @@ extension DiagramLayoutEngine {
                     let ra = runs[a], rb = runs[b]
                     guard abs(ra.c - rb.c) < tol else { continue }          // same track
                     guard min(ra.hi, rb.hi) - max(ra.lo, rb.lo) > tol else { continue } // overlap
-                    let t = ra.movable ? a : (rb.movable ? b : -1)
-                    guard t >= 0 else { continue }
-                    let other = (t == a ? rb : ra)
-                    let s = runs[t]
-                    let dir: CGFloat = s.c >= other.c ? 1 : -1              // push away
-                    let shift = dir * minSep - (s.c - other.c)
-                    routes[s.e][s.i] = offsetCross(routes[s.e][s.i], by: shift, horizontal: horizontal)
-                    routes[s.e][s.i + 1] = offsetCross(routes[s.e][s.i + 1], by: shift, horizontal: horizontal)
-                    runs[t].c += shift
-                    moved = true
+                    for t in [a, b] where runs[t].movable {
+                        let other = (t == a ? rb : ra)
+                        let s = runs[t]
+                        let dir: CGFloat = s.c >= other.c ? 1 : -1          // push away
+                        let shift = dir * minSep - (s.c - other.c)
+                        var pts = routes[s.e]
+                        pts[s.i] = offsetCross(pts[s.i], by: shift, horizontal: horizontal)
+                        pts[s.i + 1] = offsetCross(pts[s.i + 1], by: shift, horizontal: horizontal)
+                        if !inset.isEmpty, blocked(pts, s.i) > blocked(routes[s.e], s.i) { continue }
+                        routes[s.e] = pts
+                        runs[t].c += shift
+                        moved = true
+                        break
+                    }
                 }
             }
             if !moved { break }
@@ -1818,7 +1978,8 @@ extension DiagramLayoutEngine {
     /// end is an interior bend is moved, so a run anchored on a node border never
     /// detaches; when both are movable the longer run's track wins (least visual
     /// change). A few passes let a collapse that exposes another tiny jog settle.
-    static func straightenJogs(_ routes: inout [[CGPoint]], horizontal: Bool, maxJog: CGFloat) {
+    static func straightenJogs(_ routes: inout [[CGPoint]], horizontal: Bool, maxJog: CGFloat, endRun: CGFloat = 0,
+                               decisions: [CGRect] = []) {
         func cross(_ p: CGPoint) -> CGFloat { horizontal ? p.y : p.x }
         func main(_ p: CGPoint) -> CGFloat { horizontal ? p.x : p.y }
         func setCross(_ p: CGPoint, _ c: CGFloat) -> CGPoint {
@@ -1846,6 +2007,17 @@ extension DiagramLayoutEngine {
                     else if afterMovable { moveAfter = true }
                     else if beforeMovable { moveAfter = false }
                     else { continue }                              // neither: can't straighten safely
+                    // Nor where that shortens a run off a node below an end
+                    // run: the end would read as a hook (but a decision's
+                    // branches fork at its vertex, and may at once).
+                    func hooks(_ tip: CGPoint, _ old: CGPoint, _ new: CGPoint) -> Bool {
+                        guard !decisions.contains(where: { $0.insetBy(dx: -1, dy: -1).contains(tip) }) else { return false }
+                        let was = hypot(old.x - tip.x, old.y - tip.y), now = hypot(new.x - tip.x, new.y - tip.y)
+                        return now < was && now < endRun
+                    }
+                    if moveAfter, k + 2 == pts.count - 2,
+                       hooks(pts[pts.count - 1], d, setCross(d, cross(b))) { continue }
+                    if !moveAfter, k - 1 == 1, hooks(pts[0], a, setCross(a, cross(c))) { continue }
                     if moveAfter {                                 // after-run onto the before track
                         pts[k + 1] = setCross(c, cross(b))
                         pts[k + 2] = setCross(d, cross(b))

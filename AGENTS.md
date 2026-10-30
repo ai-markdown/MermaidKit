@@ -6,7 +6,7 @@ This repository is the AI Markdown fork of [2389-research/MermaidKit](https://gi
 
 - Maintain AI Markdown changes on the `ai-markdown` branch, which is the default branch of this fork.
 - Preserve the upstream `main` branch as a mirror of upstream. Never commit AI Markdown changes to it or rewrite its history.
-- The `ai-markdown` branch starts from upstream commit `fab34c2b1b3fa9dd10aded00863a11b1258abcb1` (upstream `main` after `v2.9.1`, the revision measured in the evaluation; `v2.9.1` itself is `64c19fbddf5604122b01563b3ab727dbadf0ee95`), the version evaluated for AI Markdown. Do not combine maintenance changes with an upstream upgrade; adopting a newer upstream revision is a separate, explicitly reviewed change that must be revalidated.
+- The current upstream baseline is `v2.10.0`, commit `18e56748e9246a6b647985c4c54ea3b56e646d89`, merged into `ai-markdown` while preserving the fork's maintenance commits. The initial evaluation baseline was `fab34c2b1b3fa9dd10aded00863a11b1258abcb1` (upstream `main` after `v2.9.1`; the `v2.9.1` tag itself is `64c19fbddf5604122b01563b3ab727dbadf0ee95`). Do not combine unrelated maintenance changes with an upstream upgrade; adopting a newer upstream revision is a separate, explicitly reviewed change that must be revalidated. See `docs/notes/ai-markdown-upstream-2.10.0.md` for this upgrade's scope and validation.
 
 ## Consumption by ai-markdown-swift
 

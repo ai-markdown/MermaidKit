@@ -250,6 +250,31 @@ final class DroppedContentTests: XCTestCase {
         }
     }
 
+    func testStateScenePreservesChoicesAndNotesTogether() throws {
+        let diagram = try XCTUnwrap(MermaidParser.parse("""
+        stateDiagram-v2
+          state check <<choice>>
+          [*] --> check
+          check --> Accepted : yes
+          check --> Rejected : no
+          note right of check : choose a branch
+        """))
+        guard case .state(let state) = diagram else { return XCTFail("expected state") }
+        let layout = DiagramLayoutEngine.layout(state, measure: measure)
+        let scene = DiagramScene.lower(diagram, measure: measure)
+        let choice = try XCTUnwrap(scene.nodes.first { $0.id == "check" })
+        XCTAssertTrue(choice.isDecision, "choice vertices must remain exempt from hooked-end lint")
+
+        let note = try XCTUnwrap(layout.notes.first)
+        let noteNode = try XCTUnwrap(scene.nodes.first { $0.frame == note.frame })
+        XCTAssertFalse(noteNode.isContainer, "note boxes must participate in overlap checks")
+        XCTAssertFalse(noteNode.isDecision)
+        let noteLabel = try XCTUnwrap(scene.labels.first { $0.text == "choose a branch" })
+        XCTAssertTrue(noteNode.frame.contains(noteLabel.frame), "note text must remain inside its box")
+        XCTAssertNil(noteLabel.anchorEdge, "note leaders are decorations, not transitions")
+        XCTAssertEqual(scene.edges.count, state.edges.count)
+    }
+
     func testStateNoteOnUndeclaredStateDeclaresIt() throws {
         let source = "stateDiagram-v2\n  A --> B\n  note left of Z : creates Z"
         guard case .state(let state) = try XCTUnwrap(MermaidParser.parse(source)) else { return XCTFail() }

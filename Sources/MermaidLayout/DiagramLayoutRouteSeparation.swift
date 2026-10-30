@@ -13,7 +13,10 @@ import CoreGraphics
 ///
 /// This pass finds exactly what that rule finds, two segments of different
 /// edges on one line (within 1pt) overlapping by more than 8pt, and moves one
-/// of them aside, a jog track at a time, until it is clear. Only an interior
+/// of them aside, a jog track at a time, until it is clear (or, where no
+/// whole track clears it, half a track: two edges that cross in an X between
+/// aligned ports overlap by their jogs' distance on both columns, so only
+/// jogs nearer than the tolerance clear them). Only an interior
 /// segment moves, so no edge comes off its node, and a move is taken only if
 /// its two neighbours keep their direction, nothing moved runs through a
 /// node, and no new pair is doubled. A chart with no doubled pair is left
@@ -26,7 +29,7 @@ extension DiagramLayoutEngine {
 
     static func separateDoubledRuns(
         _ routes: inout [[CGPoint]], fixed: Set<Int>, ignored: Set<Int>,
-        obstacles: [CGRect], track: CGFloat
+        obstacles: [CGRect], track: CGFloat, endRun: CGFloat = 0, decisions: [CGRect] = []
     ) {
         struct Segment { let edge: Int, index: Int }
         struct Line: Hashable { let horizontal: Bool, at: Int }
@@ -163,6 +166,16 @@ extension DiagramLayoutEngine {
                 func shifted(_ p: CGPoint) -> CGPoint { h ? CGPoint(x: p.x, y: p.y + delta) : CGPoint(x: p.x + delta, y: p.y) }
                 let a = shifted(pts[k]), b = shifted(pts[k + 1])
                 guard keeps(pts[k - 1], pts[k], a, h), keeps(pts[k + 2], pts[k + 1], b, h) else { return .tooFar }
+                // Nor may it shorten a run off a node below an end run: the
+                // end would read as a hook (`edge-end-hooked`). A decision's
+                // vertex is exempt: its branches fork there, and may at once.
+                func hooks(_ tip: CGPoint, _ old: CGPoint, _ new: CGPoint) -> Bool {
+                    guard !decisions.contains(where: { $0.insetBy(dx: -1, dy: -1).contains(tip) }) else { return false }
+                    let was = hypot(old.x - tip.x, old.y - tip.y), now = hypot(new.x - tip.x, new.y - tip.y)
+                    return now < was && now < endRun
+                }
+                if k - 1 == 0, hooks(pts[0], pts[1], a) { return .tooFar }
+                if k + 2 == pts.count - 1, hooks(pts[k + 2], pts[k + 1], b) { return .tooFar }
                 pts[k] = a; pts[k + 1] = b
             }
             let found = overlaps(s.edge, k, pts)
@@ -179,22 +192,25 @@ extension DiagramLayoutEngine {
         }
 
         let offsets = (1...16).flatMap { [CGFloat($0) * track, -CGFloat($0) * track] }
+        let halves = (0..<16).flatMap { [(CGFloat($0) + 0.5) * track, -(CGFloat($0) + 0.5) * track] }
         // The best move for any of `candidates`, in order: the first of the
-        // lowest grade; nil if none helps.
+        // lowest grade, by whole tracks before half ones; nil if none helps.
         func bestMove(_ candidates: [Segment]) -> (edge: Int, route: [CGPoint], moved: Int)? {
             var best: (grade: Int, edge: Int, route: [CGPoint], moved: Int)?
-            for c in candidates {
-                let route = routes[c.edge]
-                let doubledNow = overlaps(c.edge, c.index, route).filter { $0 > doubledRunTolerance }.count
-                var blocked: Set<Bool> = []          // signs gone too far
-                for delta in offsets where !blocked.contains(delta > 0) {
-                    switch evaluate(c, by: delta, better: best?.grade ?? 3, doubledNow: doubledNow) {
-                    case .grade(let g, let route, let moved):
-                        best = (g, c.edge, route, moved)
-                        if g == 0 { return (c.edge, route, moved) }
-                    case .immovable: blocked = [true, false]
-                    case .tooFar: blocked.insert(delta > 0)
-                    case .refused: break
+            for offsets in [offsets, halves] where best?.grade != 0 {
+                for c in candidates {
+                    let route = routes[c.edge]
+                    let doubledNow = overlaps(c.edge, c.index, route).filter { $0 > doubledRunTolerance }.count
+                    var blocked: Set<Bool> = []          // signs gone too far
+                    for delta in offsets where !blocked.contains(delta > 0) {
+                        switch evaluate(c, by: delta, better: best?.grade ?? 3, doubledNow: doubledNow) {
+                        case .grade(let g, let route, let moved):
+                            best = (g, c.edge, route, moved)
+                            if g == 0 { return (c.edge, route, moved) }
+                        case .immovable: blocked = [true, false]
+                        case .tooFar: blocked.insert(delta > 0)
+                        case .refused: break
+                        }
                     }
                 }
             }
@@ -250,6 +266,225 @@ extension DiagramLayoutEngine {
                 for j in (m.index - 1)...(m.index + 1) {
                     let c = Segment(edge: m.edge, index: j)
                     for p in doubled(c) { work.append(p.edge > c.edge ? (c, p) : (p, c)) }
+                }
+            }
+        }
+    }
+}
+
+extension DiagramLayoutEngine {
+
+    /// Reorders the jogs in each layer gap so they cross as little as they
+    /// can (#112). A jog is the cross-axis step of a route that comes into
+    /// the gap from one side and leaves by the other: in a top-down chart, a
+    /// run down from above, a step across at the jog's height, a run down
+    /// below. Two jogs in one gap cross only where one's run passes through
+    /// the other's step, so which of the two is higher decides it: with P
+    /// above Q, Q's run down from above crosses P's step if it lies within
+    /// it, and P's run on down crosses Q's step if that lies within Q's.
+    ///
+    /// Fans choose each gap's tracks; this keeps exactly those tracks, so the
+    /// gap's room still holds, and only changes which jog takes which,
+    /// moving one jog at a time to wherever in the order it crosses least,
+    /// while any move does. A captioned edge's single bend stops an end run
+    /// short of its target, so its caption has one long run; where that
+    /// crosses, it may stop as short of its source, where the caption still
+    /// fits, or go back to its own fan track (`captionBends`).
+    /// No move brings a run within `near` of another edge's, where the two
+    /// would draw as one or be straightened onto each other.
+    static func orderJogsInGaps(
+        _ routes: inout [[CGPoint]], gaps: [(lo: CGFloat, hi: CGFloat)],
+        horizontal: Bool, captionBends: [Int: (natural: CGFloat, source: CGFloat?)] = [:],
+        captioned: Set<Int> = [], track: CGFloat, near: CGFloat = 8, ignored: Set<Int>
+    ) {
+        guard !gaps.isEmpty else { return }
+        func cross(_ p: CGPoint) -> CGFloat { horizontal ? p.y : p.x }
+        func main(_ p: CGPoint) -> CGFloat { horizontal ? p.x : p.y }
+        struct Jog {
+            var edge: Int, at: Int, main: CGFloat, lo: CGFloat, hi: CGFloat, top: CGFloat, bottom: CGFloat
+            /// Where its runs start above the gap and end below it.
+            var upper: CGFloat, lower: CGFloat
+            /// For a captioned bend, the other places it may take: short of
+            /// its source, keeping its caption, then its fan track.
+            var options: [CGFloat] = []
+            var isBend = false
+            /// Stays on its track: a captioned jog that isn't such a bend,
+            /// whose caption was placed for it, or one sharing an end with
+            /// another, whose runs into that end would draw as one.
+            var pinned = false
+        }
+        var byGap: [Int: [Jog]] = [:]
+        for (e, pts) in routes.enumerated() where !ignored.contains(e) && pts.count >= 4 {
+            for k in 1..<(pts.count - 2) {
+                let a = pts[k], b = pts[k + 1]
+                guard abs(main(a) - main(b)) < 0.5, abs(cross(a) - cross(b)) > 0.5 else { continue }
+                let before = pts[k - 1], after = pts[k + 2]
+                guard abs(cross(before) - cross(a)) < 0.5, abs(cross(after) - cross(b)) < 0.5 else { continue }
+                let m = main(a)
+                guard let g = gaps.firstIndex(where: { $0.lo - 0.5 <= m && m <= $0.hi + 0.5 }) else { continue }
+                // Into the gap from one side and out by the other, past both ends.
+                let down = main(before) < main(after)
+                let (upper, lower) = down ? (before, after) : (after, before)
+                guard main(upper) <= gaps[g].lo + 0.5, main(lower) >= gaps[g].hi - 0.5 else { continue }
+                let (top, bottom) = down ? (cross(a), cross(b)) : (cross(b), cross(a))
+                var jog = Jog(edge: e, at: k, main: m, lo: min(cross(a), cross(b)), hi: max(cross(a), cross(b)),
+                              top: top, bottom: bottom, upper: main(upper), lower: main(lower))
+                if let bend = captionBends[e], pts.count == 4 {
+                    jog.isBend = true
+                    // The source is the route's first point.
+                    let source = bend.source.map { main(pts[0]) + (main(pts[3]) > main(pts[0]) ? $0 : -$0) }
+                    for t in [source, bend.natural].compactMap({ $0 })
+                    where abs(t - m) > 0.5 && gaps[g].lo - 0.5 <= t && t <= gaps[g].hi + 0.5 { jog.options.append(t) }
+                } else if captioned.contains(e) {
+                    jog.pinned = true
+                }
+                byGap[g, default: []].append(jog)
+            }
+        }
+        for g in byGap.keys.sorted() {
+            var jogs = byGap[g]!
+            let n = jogs.count
+            guard n > 1 else { continue }
+            func within(_ c: CGFloat, _ j: Jog) -> Bool { j.lo + 0.5 < c && c < j.hi - 0.5 }
+            // Touching counts: two jogs that meet end to end can't share a track.
+            func overlaps(_ p: Jog, _ q: Jog) -> Bool { min(p.hi, q.hi) - max(p.lo, q.lo) > -0.5 }
+            for p in 0..<n {
+                for q in 0..<n where p != q && jogs[p].edge != jogs[q].edge
+                    && (abs(jogs[p].top - jogs[q].top) < 0.5 || abs(jogs[p].bottom - jogs[q].bottom) < 0.5) {
+                    jogs[p].pinned = true; jogs[p].options = []
+                }
+            }
+            // cost[p][q]: crossings between p and q with p above q.
+            var cost = [[Int]](repeating: [Int](repeating: 0, count: n), count: n)
+            var any = false
+            for p in 0..<n {
+                for q in 0..<n where p != q && jogs[p].edge != jogs[q].edge {
+                    cost[p][q] = (within(jogs[q].top, jogs[p]) ? 1 : 0) + (within(jogs[p].bottom, jogs[q]) ? 1 : 0)
+                    if cost[p][q] > 0 { any = true }
+                }
+            }
+            guard any else { continue }
+            func crossings(_ order: [Int]) -> Int {
+                var total = 0
+                for (i, p) in order.enumerated() { for q in order[(i + 1)...] { total += cost[p][q] } }
+                return total
+            }
+            let byMain = Array(0..<n).sorted {
+                (jogs[$0].main, jogs[$0].edge, jogs[$0].at) < (jogs[$1].main, jogs[$1].edge, jogs[$1].at)
+            }
+            let before = crossings(byMain)
+            // Bends and pinned jogs sit where they are put; the rest move to
+            // wherever in the order they cross least.
+            func arrange(_ order: [Int], fixed: (Int) -> Bool) -> [Int] {
+                var order = order
+                var improved = true, rounds = 0
+                while improved && rounds < 4 {
+                    improved = false; rounds += 1
+                    for x in order where !fixed(x) {
+                        let rest = order.filter { $0 != x }
+                        // Crossings with x at each place among the rest:
+                        // those before it are above it.
+                        var here = rest.reduce(0) { $0 + cost[x][$1] }
+                        var best = here, bestAt = 0
+                        for (i, o) in rest.enumerated() {
+                            here += cost[o][x] - cost[x][o]
+                            if here < best { best = here; bestAt = i + 1 }
+                        }
+                        let now = order.firstIndex(of: x)!
+                        let current = rest.prefix(now).reduce(0) { $0 + cost[$1][x] }
+                            + rest.dropFirst(now).reduce(0) { $0 + cost[x][$1] }
+                        if best < current {
+                            var next = rest; next.insert(x, at: bestAt); order = next
+                            improved = true
+                        }
+                    }
+                }
+                return order
+            }
+            // The free jogs' tracks, each used at most once by jogs that overlap.
+            let free = byMain.filter { !jogs[$0].isBend && !jogs[$0].pinned }
+            var tracks: [CGFloat] = []
+            for t in free.map({ jogs[$0].main }) where tracks.last.map({ t - $0 > 0.5 }) ?? true { tracks.append(t) }
+            // Down an order, each free jog keeps its track if that is still
+            // below every earlier one it overlaps, else takes the next free
+            // one (or, failing that, every one the first free one). A bend or
+            // pinned jog sits where it is put, past every earlier jog it
+            // overlaps, by half a track from an earlier bend. Nil when the
+            // order can't be held.
+            func assign(_ order: [Int], at: [Int: CGFloat], keeping: Bool) -> [Int: CGFloat]? {
+                var assigned: [Int: CGFloat] = [:]
+                for (i, j) in order.enumerated() {
+                    let earlier = order[..<i].filter { overlaps(jogs[$0], jogs[j]) }
+                    let floor = earlier.compactMap { assigned[$0] }.max()
+                    if let t = at[j] {
+                        guard floor.map({ t > $0 + 0.5 }) ?? true,
+                              earlier.allSatisfy({ !jogs[$0].isBend || t - assigned[$0]! >= track / 2 }) else { return nil }
+                        assigned[j] = t
+                    } else if keeping, floor.map({ jogs[j].main > $0 + 0.5 }) ?? true {
+                        assigned[j] = jogs[j].main
+                    } else {
+                        guard let t = tracks.first(where: { t in floor.map { t > $0 + 0.5 } ?? true }) else { return nil }
+                        assigned[j] = t
+                    }
+                }
+                return assigned
+            }
+            // Runs of other edges within `near` of a jog's two runs, along
+            // more than the doubled tolerance.
+            let current = routes
+            func beside(_ j: Int, at t: CGFloat) -> Int {
+                let jog = jogs[j]
+                var count = 0
+                for (c, from, to) in [(jog.top, jog.upper, t), (jog.bottom, t, jog.lower)] {
+                    let (lo, hi) = (min(from, to), max(from, to))
+                    for (e, pts) in current.enumerated() where e != jog.edge && !ignored.contains(e) && pts.count >= 2 {
+                        for (a, b) in zip(pts, pts.dropFirst()) where abs(cross(a) - cross(b)) < 0.5
+                            && abs(cross(a) - c) < near
+                            && min(hi, max(main(a), main(b))) - max(lo, min(main(a), main(b))) > doubledRunTolerance {
+                            count += 1
+                        }
+                    }
+                }
+                return count
+            }
+            func crowds(_ assigned: [Int: CGFloat]) -> Bool {
+                assigned.contains { j, t in abs(t - jogs[j].main) > 0.01 && beside(j, at: t) > beside(j, at: jogs[j].main) }
+            }
+            // Each bend where it is or at one of its other places, every way
+            // while there are few: the fewest crossings wins, then the fewest
+            // captions cut short (a bend back on its fan track), then the
+            // fewest bends moved, of the ways the gap can hold.
+            let bends = byMain.filter { !jogs[$0].options.isEmpty }
+            // While the ways stay few; a bend past that stays where it is.
+            var choices: [[Int]] = [[]]
+            var tried: [Int] = []
+            for j in bends where choices.count * (jogs[j].options.count + 1) <= 64 {
+                choices = choices.flatMap { c in (0...jogs[j].options.count).map { c + [$0] } }
+                tried.append(j)
+            }
+            var ways: [(order: [Int], at: [Int: CGFloat], crossings: Int, cut: Int, moved: Int)] = []
+            for choice in choices {
+                var at: [Int: CGFloat] = [:]
+                for j in byMain where jogs[j].isBend || jogs[j].pinned { at[j] = jogs[j].main }
+                var cut = 0
+                for (j, pick) in zip(tried, choice) where pick > 0 {
+                    at[j] = jogs[j].options[pick - 1]
+                    if abs(at[j]! - captionBends[jogs[j].edge]!.natural) < 0.5 { cut += 1 }
+                }
+                let start = byMain.sorted { (at[$0] ?? jogs[$0].main, $0) < (at[$1] ?? jogs[$1].main, $1) }
+                let order = arrange(start, fixed: { at[$0] != nil })
+                ways.append((order, at, crossings(order), cut, choice.filter { $0 > 0 }.count))
+            }
+            ways.sort { ($0.crossings, $0.cut, $0.moved) < ($1.crossings, $1.cut, $1.moved) }
+            guard let (_, assigned) = ways.lazy.filter({ $0.crossings < before }).compactMap({ way in
+                [true, false].lazy.compactMap { assign(way.order, at: way.at, keeping: $0) }
+                    .first { !crowds($0) }.map { (way, $0) }
+            }).first else { continue }
+            for (j, t) in assigned where abs(t - jogs[j].main) > 0.01 {
+                let jog = jogs[j]
+                for k in [jog.at, jog.at + 1] {
+                    routes[jog.edge][k] = horizontal ? CGPoint(x: t, y: routes[jog.edge][k].y)
+                                                     : CGPoint(x: routes[jog.edge][k].x, y: t)
                 }
             }
         }

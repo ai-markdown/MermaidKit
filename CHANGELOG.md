@@ -1,6 +1,30 @@
 # Changelog
 
-## Unreleased
+## 2.10.0 — Subgraphs that span rows, fans that don't cross, ends that don't hook
+
+Flowchart routing gets a long overdue overhaul. A subgraph's box spans the
+rows its members take when an edge would otherwise point backwards; two
+edges never draw as one; a fan's edges cross far less, and every jog in a
+layer gap takes its track in the order that crosses least; and no edge ends
+on a hook. Two new linter rules find what was wrong deterministically. Over
+3,000 dense random charts, doubled edges fall from 1,246 on 2.9.1 to 0; over
+the fan, gap and hook work alone, routes through a node fall from 73 to 15,
+crossings from 419 to 258, and hooked ends (counted by the new rule) from
+2,530 to 59. Layouts change for the charts these fixes touch: a handful of
+corpus charts, and the cross-platform conformance signature, now
+`b26cce4b4a877478`, the same on every platform.
+
+### Added
+
+- **Two linter rules.** `edge-end-hooked` flags a bending route that leaves
+  or meets a node on a straight run shorter than an arrowhead and the
+  router's shortest step (`DiagramLayoutLinter.minEndRun`, 19.5pt), except a
+  loop and a decision's vertex. `label-cut-by-own-edge` flags a caption that
+  straddles a step of its own route. `DiagramScene.Node.isDecision` marks a
+  decision (a flowchart diamond, a state chart's choice), whose branches
+  fork at its vertices; it is not part of the encoded scene.
+  `DiagramLayoutLinter.minCaptionStub` names the 10pt stub
+  `label-crowds-edge` already used.
 
 ### Fixed
 
@@ -47,8 +71,85 @@
   Over 3,000 seeded random charts, doubled pairs fall from 1,246 to 3, and
   over 3,000 with subgraphs from 474 to 0; no chart gains a route through a
   node. Every corpus chart lays out exactly as before, and so does any chart
-  with neither defect. A fan wider than its layer gap can still run out of
-  tracks (#108).
+  with neither defect.
+
+- **A wide fan's jogs fit in their layer gap.** The edges into one node, and
+  the edges out of one, jog on tracks 10pt apart, one per edge, centred on
+  the gap's middle. A fan wider than the gap had its outer jogs clamped onto
+  the nodes' faces, where they shared a line (from a 7-edge fan in a plain
+  gap). A gap now grows until every track fits an arrowhead clear of each
+  face. A fan's tracks apply only where it meets its hub: an edge jogs on
+  its fan-out's track in the gap it leaves by, on its fan-in's in the gap it
+  enters by, and mid-gap in between, so a long fan widens only the gaps
+  beside its ends. A gap that carries no fan keeps the configured layer gap.
+  Where two edges cross in an X between ports that line up, no whole jog
+  track separates them, so the last separation pass also tries half a
+  track. The issue's 20-edge fan has no doubled line; across 3,000 dense
+  random charts, lint errors fall from 232 to 162 and routes through a node
+  from 73 to 20. Those charts grow taller where a fan needs it; one corpus
+  chart, which stays lint-clean, changes. A fan with more edges than its
+  node's face has room for still crowds their ports nearer than a line
+  apart. (#108)
+
+- **A fan's edges cross one another far less.** A fan's jogs were stacked
+  in cross order across the whole fan, which suits only one side of its hub:
+  on the other, every two edges that jogged crossed, a plain 4-edge fan
+  included. Each side of a hub now takes its fan's tracks from the one
+  nearest the hub, the edge reaching farthest out first, so a lone fan's
+  edges never cross, and edges through the hub's other face spread over
+  their own tracks. Parallel edges go in the order of their ports, so their
+  places in the fan they leave and the one they enter agree instead of
+  cancelling onto the gap's middle. A captioned back edge with one bend now slides the bend toward its
+  arrowhead, as a forward one does, leaving its caption one long run. A run
+  pushed apart from another edge's is no longer pushed into a node. With
+  #108, over 3,000 dense random charts, lint errors fall from 232 on 2.9.1
+  to 79, crossings from 419 to 358, and no two edges share a line; over
+  3,000 with subgraphs, errors fall from 168 to 91. Three corpus charts
+  change, each still lint-clean. (#110)
+
+- **Jogs in a gap take their tracks in the order that crosses least.** Two
+  jogs in one layer gap cross only where one's run passes through the
+  other's step, so which is higher decides it. A last ordering pass keeps
+  each gap's tracks, so its room still holds, and moves one jog at a time to
+  wherever in the order it crosses least. That repairs what ranking each fan
+  alone missed: an edge between adjacent layers jogged on the sum of its
+  places in two fans, which could reverse one of them. A captioned edge's
+  single bend may now stop as short of its source as of its target, where
+  its caption still fits, and a gap that carries a captioned two-cycle
+  (`A -->|go| B`, `B -->|back| A`) holds the caption past a bend at either
+  end. A jog that shares a port with another, as at a decision's vertex,
+  or carries a caption it isn't such a bend for, keeps its track, and no
+  move brings a run within a minimum jog of another edge's. Over 300 seeded
+  random two-row charts, crossings between edges that share a node fall
+  from 186 to 129; over 3,000 dense random charts all crossings fall from
+  358 to 281, and over 3,000 with subgraphs from 225 to 160, with lint
+  errors about level (79 to 81, 91 to 89). Every corpus chart lays out as
+  before. (#112)
+
+- **No edge ends on a hook.** A route that bent within an arrowhead of a
+  node drew a hook: the arrow bent over at its target, or the line kinked
+  against the face it left. A captioned bend stopped exactly an arrowhead
+  short of its target, a fan's outer tracks sat an arrowhead from the
+  faces, and later passes nudged, straightened and grid-snapped bends
+  closer still. A new linter rule, `edge-end-hooked`, now finds every such
+  end from the geometry alone: a bending route must leave and meet its
+  nodes on a straight run of at least an arrowhead and the router's
+  shortest step (19.5pt). Loops, and a decision's vertex, where branches
+  fork at once, are exempt. The layout keeps to it: fan tracks and caption
+  bends stop that far from a face, a captioned bend's gap holds the extra
+  room, separating, straightening and snapping never shorten an end run
+  below it, and a captioned bend that would cross another may go back to
+  its fan track, or stop as short of its source where its caption still
+  fits. Over 3,000 dense random charts, hooked ends fall from 2,530 to 60,
+  and over 3,000 with subgraphs from 1,677 to 87; edge crossings fall
+  too (281 to 258, 160 to 135), and captions on a bend or crossing (30 to
+  6, 36 to 5). A second new rule, `label-cut-by-own-edge`, finds a caption
+  that straddles a step of its own route without covering either corner.
+  Captions that meet one node across one gap and can't stack across the
+  flow, more of them than its face holds, sit one after another along their
+  runs, and their gap holds them all: captions short of a full stub stay
+  about level (36 to 34, 19 to 37), and on a 1,500-chart mixed-shape probe
+  fall from 161 to 112. (#114, #115)
 
 New tests check, over seeded random graphs with cycles, self-loops and
 parallel edges, that an edge on no cycle points strictly down: in the layer
